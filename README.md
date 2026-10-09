@@ -6,6 +6,11 @@ Windows 7 API/subsystem target; actual execution on Windows 7 is untested.
 
 [Download Windows x86 builds](https://github.com/drel4/SGHemu/releases).
 
+## AI-assisted project
+
+This project is AI-assisted. If you hate AI-assisted software, don't use it.
+This notice is not an additional restriction on the WTFPL license.
+
 ## Current milestone
 
 The C100 firmware now reaches **normal standby with a virtual SIM**, showing
