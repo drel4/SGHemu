@@ -1,0 +1,342 @@
+Program: M5_EmuSmw5.dll
+EXPORT MaSound_SetEmuPath 100a70a0
+BODY 100a70a0 MaSound_SetEmuPath
+100a70af RET
+EXPORT MaSound_Generate 100a70b0
+BODY 100a70b0 MaSound_Generate
+100a70c9 RET
+EXPORT MaSound_Initialize 100a70d0
+BODY 100a70d0 MaSound_Initialize
+TAIL JUMP 100a6910
+100a6992 RET
+EXPORT MaSound_Terminate 100a70e0
+BODY 100a70e0 MaSound_Terminate
+100a710e RET
+EXPORT MaSound_DeviceControl 100a7110
+BODY 100a7110 MaSound_DeviceControl
+100a7155 RET
+EXPORT MaSound_DeviceControlEx 100a7160
+BODY 100a7160 MaSound_DeviceControlEx
+100a71a0 RET
+EXPORT MaSound_Create 100a71b0
+BODY 100a71b0 MaSound_Create
+100a71e6 RET
+EXPORT MaSound_Load 100a71f0
+BODY 100a71f0 MaSound_Load
+100a7218 RET
+EXPORT MaSound_Open 100a7220
+BODY 100a7220 MaSound_Open
+100a7265 RET
+EXPORT MaSound_Control 100a7270
+BODY 100a7270 MaSound_Control
+100a72ba RET
+EXPORT MaSound_Standby 100a72c0
+BODY 100a72c0 MaSound_Standby
+100a7300 RET
+EXPORT MaSound_Seek 100a7310
+BODY 100a7310 MaSound_Seek
+100a735a RET
+EXPORT MaSound_Start 100a7360
+BODY 100a7360 MaSound_Start
+100a73a5 RET
+EXPORT MaSound_Stop 100a73b0
+BODY 100a73b0 MaSound_Stop
+100a73f0 RET
+EXPORT MaSound_Pause 100a7400
+BODY 100a7400 MaSound_Pause
+100a7440 RET
+EXPORT MaSound_Restart 100a7450
+BODY 100a7450 MaSound_Restart
+100a7490 RET
+EXPORT MaSound_Close 100a74a0
+BODY 100a74a0 MaSound_Close
+100a74e0 RET
+EXPORT MaSound_Unload 100a74f0
+BODY 100a74f0 MaSound_Unload
+100a7509 RET
+EXPORT MaSound_Delete 100a7510
+BODY 100a7510 MaSound_Delete
+100a7546 RET
+EXPORT MaSound_GetEmuInfo 100a8770
+BODY 100a8770 MaSound_GetEmuInfo
+100a877f RET
+EXPORT MaSound_EmuTerminate 100a8930
+BODY 100a8930 MaSound_EmuTerminate
+TAIL JUMP 100a8780
+100a8855 RET
+100a885b RET
+EXPORT MaSound_EmuInitialize 100a8c10
+BODY 100a8c10 MaSound_EmuInitialize
+100a8db7 RET
+EXTERNAL SYMBOLS
+timeBeginPeriod
+timeGetDevCaps
+timeEndPeriod
+DirectSoundCreate
+GlobalGetAtomNameA
+ReadFile
+WriteFile
+SetFilePointer
+FlushFileBuffers
+LockFile
+UnlockFile
+SetEndOfFile
+GetFileSize
+DuplicateHandle
+GetCurrentProcess
+FindClose
+FindFirstFileA
+GetVolumeInformationA
+GetFullPathNameA
+CreateFileA
+FileTimeToSystemTime
+FileTimeToLocalFileTime
+GetFileAttributesA
+GetFileTime
+GetCPInfo
+GetOEMCP
+RtlUnwind
+VirtualProtect
+GlobalFindAtomA
+GetSystemInfo
+VirtualQuery
+GetCommandLineA
+ExitProcess
+TerminateProcess
+ExitThread
+CreateThread
+HeapReAlloc
+SetStdHandle
+GetFileType
+HeapSize
+HeapDestroy
+HeapCreate
+VirtualFree
+IsBadWritePtr
+SetHandleCount
+GetStdHandle
+GetStartupInfoA
+FreeEnvironmentStringsA
+GetEnvironmentStrings
+FreeEnvironmentStringsW
+GetEnvironmentStringsW
+UnhandledExceptionFilter
+GetTickCount
+GetCurrentProcessId
+GetSystemTimeAsFileTime
+SetUnhandledExceptionFilter
+LCMapStringA
+LCMapStringW
+GetStringTypeA
+GetStringTypeW
+GetTimeZoneInformation
+IsBadReadPtr
+IsBadCodePtr
+SetEnvironmentVariableA
+lstrcmpW
+GlobalFlags
+InterlockedIncrement
+WritePrivateProfileStringA
+SetErrorMode
+lstrcatA
+TlsFree
+LocalReAlloc
+TlsSetValue
+TlsAlloc
+TlsGetValue
+GlobalHandle
+GlobalReAlloc
+LocalAlloc
+SetLastError
+GlobalFree
+GlobalUnlock
+FormatMessageA
+lstrcpynA
+LocalFree
+InterlockedDecrement
+SuspendThread
+ResumeThread
+SetThreadPriority
+GlobalAddAtomA
+FindResourceA
+LoadResource
+LockResource
+SizeofResource
+GetCurrentThread
+GetCurrentThreadId
+GlobalLock
+GlobalAlloc
+GlobalDeleteAtom
+GetModuleFileNameA
+GetModuleHandleA
+ConvertDefaultLocale
+EnumResourceLanguagesA
+lstrcpyA
+lstrcmpA
+RaiseException
+GetProcessHeap
+HeapAlloc
+HeapFree
+CompareStringW
+CompareStringA
+lstrlenA
+lstrcmpiA
+GetVersion
+GetLastError
+WideCharToMultiByte
+MultiByteToWideChar
+GetVersionExA
+GetThreadLocale
+GetLocaleInfoA
+GetACP
+InterlockedExchange
+Sleep
+QueryPerformanceCounter
+QueryPerformanceFrequency
+CloseHandle
+GetProcAddress
+LoadLibraryA
+FreeLibrary
+SetEvent
+ResetEvent
+WaitForSingleObject
+CreateEventA
+DeleteCriticalSection
+InitializeCriticalSection
+EnterCriticalSection
+LeaveCriticalSection
+VirtualAlloc
+GetCapture
+WinHelpA
+RegisterWindowMessageA
+DestroyMenu
+GetTopWindow
+DestroyWindow
+GetMessageTime
+GetMessagePos
+LoadIconA
+MapWindowPoints
+SetForegroundWindow
+GetClientRect
+GetMenu
+AdjustWindowRectEx
+GetClassInfoA
+RegisterClassA
+DefWindowProcA
+CallWindowProcA
+SystemParametersInfoA
+IsIconic
+GetWindowPlacement
+CopyRect
+SetWindowPos
+ShowWindow
+SetWindowLongA
+CreateWindowExA
+GetDlgItem
+LoadCursorA
+GetSystemMetrics
+GetSysColorBrush
+GetSysColor
+ReleaseDC
+GetDC
+GrayStringA
+DrawTextExA
+DrawTextA
+TabbedTextOutA
+ClientToScreen
+GetWindow
+GetDlgCtrlID
+PtInRect
+GetWindowTextA
+SetWindowTextA
+GetClassNameA
+wsprintfA
+GetMenuItemID
+GetMenuItemCount
+GetSubMenu
+UnhookWindowsHookEx
+SetMenuItemBitmaps
+GetFocus
+ModifyMenuA
+GetMenuState
+EnableMenuItem
+CheckMenuItem
+GetMenuCheckMarkDimensions
+LoadBitmapA
+SetWindowsHookExA
+CallNextHookEx
+GetMessageA
+TranslateMessage
+DispatchMessageA
+GetActiveWindow
+IsWindowVisible
+GetKeyState
+GetClassLongA
+GetClassInfoExA
+SetPropA
+GetCursorPos
+ValidateRect
+GetPropA
+RemovePropA
+GetForegroundWindow
+MessageBoxA
+GetParent
+GetWindowLongA
+GetLastActivePopup
+IsWindowEnabled
+EnableWindow
+SendMessageA
+SetCursor
+PostMessageA
+PostQuitMessage
+UnregisterClassA
+PeekMessageA
+GetDesktopWindow
+CharUpperA
+GetWindowRect
+SetViewportExtEx
+ScaleViewportExtEx
+SetWindowExtEx
+ScaleWindowExtEx
+DeleteDC
+GetStockObject
+SelectObject
+OffsetViewportOrgEx
+TextOutA
+RectVisible
+PtVisible
+Escape
+SetViewportOrgEx
+SetBkColor
+RestoreDC
+SaveDC
+DeleteObject
+GetDeviceCaps
+CreateBitmap
+GetClipBox
+SetMapMode
+SetTextColor
+ExtTextOutA
+GetFileTitleA
+ClosePrinter
+DocumentPropertiesA
+OpenPrinterA
+RegQueryValueA
+RegSetValueExA
+RegCreateKeyExA
+RegCloseKey
+RegOpenKeyA
+RegEnumKeyA
+RegDeleteKeyA
+RegOpenKeyExA
+RegQueryValueExA
+InitCommonControls
+PathFindExtensionA
+PathFindFileNameA
+PathStripToRootA
+PathIsUNCA
+VariantInit
+VariantChangeType
+VariantClear
+LresultFromObject
+CreateStdAccessibleObject

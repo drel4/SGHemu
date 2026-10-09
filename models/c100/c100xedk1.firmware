@@ -1,0 +1,4 @@
+name=Samsung SGH-C100 C100XEDK1 (experimental bring-up)
+model=c100xedk1-bringup.cfg
+sha256_1=e73cbc91130e6ff6fd08d769786fc2dd2abcd666b7055a6640a3d142a4561896
+sha256_2=85c1c30d1c59131fba3f7255dc3a1768df1ea8cf7aa91cb3e04c81a3a0bcc7b0
