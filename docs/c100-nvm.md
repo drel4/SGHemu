@@ -339,7 +339,11 @@ resets. It does **not** claim to emulate factory cable packets: direct guest
 service entry is an explicit high-level provisioning approximation. Original
 ROM bytes and on-flash record/checksum construction are not patched or invented.
 
-Persistence is frontend-owned, under ignored `state/<identity-hash>.snv`.
+Persistence is frontend-owned, under ignored `models/<model>/state/<identity-hash>.snv`
+(the `state` directory next to the model config). A valid legacy root-level
+`state/<identity-hash>.snv` migrates automatically when the new save is absent;
+the original is retained. Firmware identity, mapping and payload checksums are
+validated before migration, using the same atomic snapshot writer.
 The identity includes the NVM window and original firmware SHA-256 hashes plus
 ROM mapping, so renamed files share their state and different versions do not.
 GUI checkpoints changed storage every five seconds while running, and on pause,
@@ -357,9 +361,10 @@ the last checkpoint; completed provisioning survives a restart.
 CLI `--state-dir DIRECTORY` isolates a test store; `--no-persist` disables
 both automatic storage and provisioning for original erased-storage diagnostics.
 Private first/second-boot captures and logs stay in `build/`. Synthetic NVM
-checks now total 138, covering snapshots, round trips, lock exclusion, corrupt
+checks now total 157, covering snapshots, round trips, lock exclusion, corrupt
 state, failed writes, version isolation, and service provisioning/failed returns.
-The total synthetic suite, including keypad checks, is **678 checks**.
+They also cover model-local placement, reload and non-destructive legacy migration.
+The current total synthetic suite is **974 checks**.
 
 ### Final reset after default creation
 

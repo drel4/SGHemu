@@ -86,5 +86,24 @@ int main(void)
         CHECK(!machine_load(&m, "build/machine-fixture.cfg", NULL, NULL)); CHECK(!m.loaded && !m.bus.count);
         machine_destroy(&m);
     }
+    {
+        FILE *f;uint64_t before;
+        fixture(1,0);f=fopen("build/machine-fixture.cfg","a");CHECK(f!=NULL);
+        fputs("intc=0x40100\nclock=0x40b00,3900000\nclock_mode=0x0b01,23400000,46800000\nperiodic_time_irq=26,1000\n",f);CHECK(fclose(f)==0);
+        CHECK(machine_load(&m,"build/machine-fixture.cfg",NULL,NULL));CHECK(m.clock.attached&&m.periodic_time);
+        CHECK(m.clock.arm_hz==3900000&&m.clock.dsp_hz==3900000);
+        bus_write(&m.bus,0x40b02,2,0x0b01);bus_write(&m.bus,0x40b04,2,15);
+        CHECK(m.clock.arm_hz==23400000&&m.clock.dsp_hz==46800000&&!m.clock.unknown);
+        CHECK(bus_read(&m.bus,0x40b02,2)==0x0b01&&bus_read(&m.bus,0x40b04,1)==15);
+        CHECK(machine_step(&m,0));CHECK(m.cpu.clock_cycles==3&&m.clock.nanoseconds==128);
+        CHECK(machine_step(&m,0));CHECK(m.clock.nanoseconds==256);
+        m.intc.enabled=1u<<26;CHECK(machine_step(&m,0));
+        while(m.clock.nanoseconds<1200)CHECK(machine_step(&m,0));
+        CHECK(m.intc.events==1&&(m.intc.pending&(1u<<26)));
+        before=m.clock.nanoseconds;bus_write(&m.bus,0x40b04,2,0);CHECK(machine_step(&m,0));
+        CHECK(m.clock.arm_hz==3900000&&m.clock.nanoseconds-before>=769);
+        bus_write(&m.bus,0x40b02,2,0xdead);bus_write(&m.bus,0x40b04,2,15);
+        CHECK(m.clock.unknown&&m.clock.arm_hz==3900000);CHECK(m.bus.faults==0);machine_destroy(&m);
+    }
     printf("Machine/frontend backend: %u checks passed.\n", checks); return 0;
 }

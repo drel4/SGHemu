@@ -1,8 +1,9 @@
 # Native Win32 frontend
 
 Run `build/sghemu-gui.exe`. The main client area contains only the unframed LCD
-and native keypad buttons below it; the native title/menu bar remains. Integer
-LCD zoom 1x/2x/3x uses GDI nearest-neighbor `StretchDIBits`.
+and native keypad buttons below it; the native title/menu bar remains.
+Clear/Back occupies a full-width row between navigation/call keys and digits.
+Integer LCD zoom 1x/2x/3x uses GDI nearest-neighbor `StretchDIBits`.
 
 File > Open firmware folder (Ctrl+O) identifies complete ROM pairs by SHA-256
 and automatically boots the selected profile. Multiple supported sets offer a
@@ -10,7 +11,11 @@ selection menu. Unknown/incomplete sets report a clear message. File > Open
 model config is retained as an advanced workflow. Config ROM paths are relative
 to their config directory; the GUI locates its workspace relative to `build/`.
 
-NVM automatically loads from ignored `state/` files keyed by firmware hashes
+File > Phone filesystem manager opens a native directory inspector with Refresh,
+Export directory (TSV metadata) and Back up NVM. File-content export and MMF,
+picture/JAR imports are not implemented yet; see [filesystem evidence](c100-filesystem.md).
+
+NVM automatically loads from ignored `models/<model>/state/` files keyed by firmware hashes
 and memory map. It saves on pause, reset/model change, normal close, and changed
 storage checkpoints every five seconds while running. Unchanged storage is not
 rewritten. Manual Save has been removed. File > Import NVM snapshot and reset
@@ -56,10 +61,24 @@ expected because radio/network emulation is absent. The strict startup profile r
 folder import chooses the experimental bring-up profile. No decorative frame,
 labels, captions or status bar were added to the main client area.
 
-Execution batches are limited to 40,000 instructions or approximately 8 ms
-per 16 ms GUI timer callback. Guest IRQs are driven by interpreter ticks, not
-Windows wall time; clock speed remains unknown. All MA-5 calls remain in the
-standalone audio probe's dedicated thread, and emulator audio remains silent.
+Silent execution batches are limited to 120,000 instructions or approximately 8 ms
+per 16 ms GUI timer callback. Hardware-audio execution allows up to 1,000,000
+instructions for clock-enabled profiles, or one tenth of the legacy tick rate,
+with a 32 ms wall-time budget; buffered WinMM output supplies backpressure. The audio worker requests
+1 ms multimedia timer resolution only while speaker output is active, and releases
+it on teardown. C100 frame IRQs and Yamaha synthesis use estimated core cycles
+converted to emulated time, not Windows wall time. SIM/DMA retain legacy tick
+timing, and external memory wait states remain uncalibrated. Firmware reports an
+awake ARM clock of 23.4 MHz; see [clock evidence](c100-clock.md). Experimental hardware audio is
+opt-in: **Emulation > Import Yamaha hardware DLL...** imports the pinned
+`M5_EmuHw.dll`, resets the phone paused, and saves the path/enable setting in
+`state/audio.ini`. Press F5 afterward. The audio toggle also resets paused.
+All DLL calls run on a dedicated worker. F6 pauses both guest chip time and
+WaveOut output. Diagnostics include FIFO/IRQ and PCM counters. Ten-millisecond
+PCM blocks use eight output buffers; speaker pacing may extend an execution batch.
+The optional INI `ticks_hz` applies only to profiles without a clock model;
+it is interpreter ticks/sec, not physical CPU MHz.
+See [audio evidence and limitations](ma5-audio.md).
 
 Build target is MSVC 2026 x86 C17 with `/W4 /WX /RTC1` and Win7-compatible
 Win32/GDI/common-control APIs. Common Controls v6/DPI manifest is embedded.

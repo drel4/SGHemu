@@ -43,16 +43,17 @@ int intc_attach(Intc *d, Bus *bus, uint32_t base)
     if (!bus_device(bus, base, 0x40, read_intc, write_intc, d)) return 0;
     d->attached = 1; return 1;
 }
-void intc_advance(Intc *d, Arm7 *cpu)
+void intc_advance_time(Intc *d, Arm7 *cpu,uint64_t ticks)
 {
     if (!d->attached) return;
     if (d->period) {
-        if (!(d->enabled & d->periodic_bit)) d->next_tick = cpu->cycles + d->period;
-        else if (cpu->cycles >= d->next_tick) {
+        if (!(d->enabled & d->periodic_bit)) d->next_tick = ticks + d->period;
+        else if (ticks >= d->next_tick) {
             d->pending |= d->periodic_bit; ++d->events;
-            d->next_tick = cpu->cycles + d->period;
+            d->next_tick += ((ticks-d->next_tick)/d->period+1)*d->period;
         }
     }
     cpu->irq = !!(d->pending & d->enabled & ~d->fiq_select);
     cpu->fiq = !!(d->pending & d->enabled & d->fiq_select);
 }
+void intc_advance(Intc *d,Arm7 *cpu){intc_advance_time(d,cpu,cpu->cycles);}

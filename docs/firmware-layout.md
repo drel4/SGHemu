@@ -38,6 +38,7 @@ Explicit import overrides are absolute. Configuration directives:
 | `flash_geometry=base,offset,size,erase_size` | Override erase size for a flash subrange; after `flash`, nonoverlapping, covering whole default 64 KiB sectors |
 | `lcd_s6b33=command_port,data_port,origin_y` | Guest LCD interface/viewport |
 | `intc=base`, `periodic_irq=bit,period` | Interrupt routing and diagnostic tick source |
+| `ma3=base,irq_mask,sequence_quantum_ns` | MA-3 byte ports and interrupt source; model-specific divider time unit, 1157 ns inferred from C100 SetSpeed |
 | `pmic=base,byte_address`, `pmic_register=index,value` | Observed serial pins and provisional initial PMIC state |
 | `identity16=address,value` | Explicit read-only diagnostic input fixture |
 | `register32=address,value` | Explicit writable latch/handoff fixture |

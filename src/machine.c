@@ -57,9 +57,43 @@ static int image_path(char *out, size_t capacity, const char *config, const char
     if (prefix + n >= capacity) return 0;
     memcpy(out, config, prefix); memcpy(out + prefix, image, n + 1); return 1;
 }
+static void clock_rate(PhoneClock *c)
+{
+    unsigned i;uint32_t arm=c->reference_hz,dsp=c->reference_hz;
+    c->unknown=0;
+    if(c->registers[2]&8) {
+        for(i=0;i<c->count;++i)if(c->registers[1]==c->encoding[i])break;
+        if(i==c->count)c->unknown=1;
+        else {if((c->registers[2]&3)==3)arm=c->arm_rates[i];if(c->registers[2]&4)dsp=c->dsp_rates[i];}
+    }
+    if(arm!=c->arm_hz)c->fraction=0; /* Less than one ns lost at a source switch. */
+    c->arm_hz=arm;c->dsp_hz=dsp;
+}
+static uint32_t clock_read(void *context,uint32_t offset,unsigned width)
+{
+    PhoneClock *c=context;uint32_t value=0;unsigned i;
+    if(offset+width>6){bus_fault_access(c->bus,0,c->base+offset,width,0,"cross-clock register access");return 0;}
+    for(i=0;i<width;++i)value|=((c->registers[(offset+i)/2]>>(((offset+i)&1)*8))&255u)<<(i*8);
+    return value;
+}
+static void clock_write(void *context,uint32_t offset,unsigned width,uint32_t value)
+{
+    PhoneClock *c=context;unsigned i;
+    if(offset+width>6){bus_fault_access(c->bus,1,c->base+offset,width,value,"cross-clock register access");return;}
+    for(i=0;i<width;++i){unsigned reg=(offset+i)/2,shift=((offset+i)&1)*8;
+        c->registers[reg]=(uint16_t)((c->registers[reg]&~(255u<<shift))|(((value>>(i*8))&255u)<<shift));}
+    clock_rate(c);
+}
+static void clock_advance(PhoneClock *c,uint64_t cycles)
+{
+    uint64_t scaled;
+    scaled=(cycles-c->clock_cycles)*1000000000+c->fraction;c->clock_cycles=cycles;
+    c->nanoseconds+=scaled/c->arm_hz;c->fraction=scaled%c->arm_hz;
+}
 void machine_destroy(Machine *m)
 {
     if (m->audio.ops) m->audio.ops->stop(&m->audio);
+    ma3_destroy(&m->ma3);
     bus_destroy(&m->bus); free(m->pixels); free(m->unplaced_rom); memset(m, 0, sizeof(*m));
 }
 int machine_load(Machine *m, const char *path, const char *rom_override, FILE *log)
@@ -156,6 +190,10 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             if (!strcmp(key, "keypad")) {
                 if (!keypad_attach(&m->keypad, &m->bus, base, size, column)) { valid = 0; break; }
             } else if (base >= SGH_MAX_KEYS || !keypad_map(&m->keypad, base, size, column)) { valid = 0; break; }
+        } else if (!strcmp(key,"ma3")) {
+            char *next=strchr(comma,',');uint32_t quantum;
+            if(!next){valid=0;break;}*next++=0;
+            if(!number(comma,&size)||!number(next,&quantum)||!ma3_attach(&m->ma3,&m->bus,&m->intc,base,size,quantum)){valid=0;break;}
         } else if (!strcmp(key, "sim")) {
             char *next=strchr(comma,','); uint32_t dma;
             if (!next) { valid=0; break; } *next++=0;
@@ -168,7 +206,23 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
         } else if (!strcmp(key, "nvram")) {
             if (m->nvram_size || !number(comma, &size) || !size || (base & 1) || (size & 1)) { valid = 0; break; }
             m->nvram_base = base; m->nvram_size = size;
-        } else if (!strcmp(key, "periodic_irq")) {
+        } else if(!strcmp(key,"userfs")) {
+            char *next=strchr(comma,','),*last;uint32_t capacity,stride;
+            if(!next||m->fs_header){valid=0;break;}*next++=0;last=strchr(next,',');
+            if(!last){valid=0;break;}*last++=0;
+            if(!base||!number(comma,&size)||!number(next,&capacity)||!number(last,&stride)||!capacity||capacity>100||stride!=28){valid=0;break;}
+            m->fs_header=base;m->fs_table=size;m->fs_capacity=capacity;m->fs_stride=stride;
+        } else if (!strcmp(key,"clock")) {
+            if(m->clock.attached||base&1||!number(comma,&size)||size<1000000||size>100000000){valid=0;break;}
+            m->clock.bus=&m->bus;m->clock.base=base;m->clock.reference_hz=m->clock.arm_hz=m->clock.dsp_hz=size;
+            if(!bus_device(&m->bus,base,6,clock_read,clock_write,&m->clock)){valid=0;break;}m->clock.attached=1;
+        } else if(!strcmp(key,"clock_mode")) {
+            char *next=strchr(comma,',');uint32_t dsp;unsigned index=m->clock.count;
+            if(!m->clock.attached||!next||index==8||base>65535){valid=0;break;}*next++=0;
+            if(!number(comma,&size)||!number(next,&dsp)||size<1000000||size>100000000||dsp<1000000||dsp>100000000){valid=0;break;}
+            m->clock.encoding[index]=(uint16_t)base;m->clock.arm_rates[index]=size;m->clock.dsp_rates[index]=dsp;++m->clock.count;
+        } else if (!strcmp(key, "periodic_irq")||!strcmp(key,"periodic_time_irq")) {
+            m->periodic_time=!strcmp(key,"periodic_time_irq");
             if (!m->intc.attached || base > 31 || !number(comma, &size) || !size) { valid = 0; break; }
             m->intc.periodic_bit = 1u << base; m->intc.period = size; m->intc.next_tick = size;
         } else if (!strcmp(key, "flash")) {
@@ -247,6 +301,7 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             }
         }
     }
+    if(valid&&m->periodic_time&&!m->clock.attached)valid=0;
     if (valid && m->nvram_size) {
         unsigned i, j;
         for (i = 0; i < m->flash_count; ++i) {
@@ -300,9 +355,12 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
 int machine_step(Machine *m, int continuation)
 {
     int hle = 0;
+    uint64_t previous_clocks=m->cpu.clock_cycles;
     if (!m->loaded || m->cpu.halted) return 0;
     sim_advance(&m->sim,m->cpu.cycles);
-    intc_advance(&m->intc, &m->cpu);
+    ma3_advance(&m->ma3,m->clock.attached?m->clock.nanoseconds:m->cpu.cycles);
+    if (*m->ma3.error) { m->cpu.halted=1; m->cpu.error=m->ma3.error; return 0; }
+    intc_advance_time(&m->intc, &m->cpu,m->periodic_time?m->clock.nanoseconds:m->cpu.cycles);
     /* Sample the hardware latch, not a synthetic guest bus access. Pending
        sources remain latched while firmware critical sections close the gate. */
     if (m->irq_gate_register && !((m->irq_gate_register->value >>
@@ -313,6 +371,8 @@ int machine_step(Machine *m, int continuation)
     if (!((m->cpu.fiq && !(m->cpu.cpsr & 0x40u)) || (m->cpu.irq && !(m->cpu.cpsr & 0x80u))))
         hle = irom_step(&m->irom, &m->cpu);
     if (hle < 0 || (!hle && !arm7_step(&m->cpu))) return 0;
+    if(hle&&m->cpu.clock_cycles==previous_clocks)++m->cpu.clock_cycles; /* Atomic HLE timing remains provisional. */
+    if(m->clock.attached)clock_advance(&m->clock,m->cpu.clock_cycles);
     m->audio.ops->advance(&m->audio, m->cpu.cycles);
     if (m->bus.fault) { if (!continuation) return 0; m->bus.fault = 0; }
     return 1;

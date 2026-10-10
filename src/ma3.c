@@ -1,0 +1,243 @@
+#include "ma3.h"
+#include <string.h>
+static void reset_parameters(Ma3 *m)
+{
+    /* MA-3 parameter defaults explicitly checked by VerifyRegisters. These
+       differ from MA-5; model real state, not a forced success return. */
+    memset(m->parameter_ram,0,sizeof(m->parameter_ram));
+    memset(m->parameter_ram+0x90,0x60,16);memset(m->parameter_ram+0xa0,0x3c,16);
+    memset(m->parameter_ram+0x14a,0x40,8);
+    m->packet_phase=m->address_bytes=m->length_bytes=m->response_mask=0;
+    m->packet_address=m->packet_length=0;
+    m->delayed_length=m->delayed_phase=m->delayed_address=m->delayed_count=m->delayed_count_bytes=0;
+}
+static unsigned translate_address(unsigned address)
+{
+    if(address<0x90)return address;
+    if(address<0x140)return address+0x30;
+    /* Native bits 2/3 correspond to MA-3 SoftInt0/1. Translate ISR separately.
+       Keep payloads in the delayed FIFO, not immediate host callbacks. */
+    if(address>=0x15a&&address<=0x15d)return address+0x7c;
+    /* Explicit no-op commands emitted by MaSndDrv_Nop. */
+    if(address==0x148||address==0x166)return 0x1df;
+    return UINT32_MAX;
+}
+static unsigned translate_value(unsigned address,unsigned value)
+{
+    /* C100 GetFmBlockFnum/GetWtBlockFnum pack FNUM[9:7],BLOCK,FNUM[6:0].
+       MA-5 expects BLOCK,FNUM[9:7],FNUM[6:0] (Hw decoder 100036B8).
+       Swap only voice pitch high bytes; preserve independent-channel bit 6
+       and the packet terminator bit 7. Voice RAM is not parameter RAM. */
+    unsigned offset=address<0x90?address:address>=0xe0&&address<0x140?address-0xe0:UINT32_MAX;
+    if(offset!=UINT32_MAX&&offset%6==3)
+        return (value&0xc0)|((value&7)<<3)|((value>>3)&7);
+    return value;
+}
+static unsigned native_irq_low(unsigned value)
+{
+    return ((value&3)<<2)|((value&0x60)>>1)|(value&0x80);
+}
+static unsigned guest_irq(unsigned low,unsigned high)
+{
+    return ((low&0x0c)>>2)|(high&0x0c)|((low&0x30)<<1)|(low&0x80);
+}
+static void immediate_parameter(Ma3 *m,unsigned address,unsigned value)
+{
+    unsigned mapped=translate_address(address);
+    if(!m->hw)return;
+    if(mapped!=UINT32_MAX){ma5_hw_parameter(m->hw,mapped,translate_value(address,value));++m->translated;}
+    else if(address==0x161){ma5_hw_register(m->hw,0x26,value&3,m->bank);++m->translated;}
+    else if(address==0x15e){++m->translated; /* High 7-bit divider field, latch on low write. */}
+    else if(address==0x15f){
+        /* C100 SetSpeed packs (divider >> 7), (divider & 127), not MA-5's
+           eight-bit register layout. Its conversion constant is 1157 ns;
+           the pinned MA-5 counter uses 1085 ns per divider unit. */
+        unsigned divider=((unsigned)m->parameter_ram[0x15e]<<7)|(value&127);
+        unsigned native=(divider*m->sequence_quantum_ns+542u)/1085u;
+        if(native>16383){strcpy(m->error,"MA-3 sequence divider exceeds MA-5 range");return;}
+        ma5_hw_register(m->hw,0x23,native>>6,m->bank);
+        ma5_hw_register(m->hw,0x24,(native&63)<<2,m->bank);++m->translated;
+    }
+    else if(address==0x160){ma5_hw_register(m->hw,0x25,value&127,m->bank);++m->translated;}
+    /* MA-3 secondary timer: C100 programs prescale 27 / reload 20, and
+       Timer0 drives stream refill plus the secondary software sequencer.
+       Native independent Timer A uses 37109 ns * prescale * reload. */
+    else if(address==0x152){ma5_hw_register(m->hw,0x2e,value&127,m->bank);++m->translated;}
+    else if(address==0x154){ma5_hw_register(m->hw,0x2f,value&127,m->bank);++m->translated;}
+    else if(address==0x155){ma5_hw_register(m->hw,0x30,value&3,m->bank);++m->translated;}
+    /* MA-3 FIFO IRQ is controlled by global IEN; seven parameter bits control
+       its other sources. MA-5 exposes FIFO enable in bit 7 of this register. */
+    else if(address==0x162){
+        ma5_hw_register(m->hw,0x11,native_irq_low(value)|128,m->bank);
+        ma5_hw_register(m->hw,0x12,value&0x0c,m->bank);++m->translated;
+    }
+    else ++m->unsupported;
+}
+static void delayed_packet(Ma3 *m,unsigned value)
+{
+    unsigned i,mapped;value&=255;
+    if(m->delayed_length==sizeof(m->delayed)){strcpy(m->error,"MA-3 delayed packet exceeds bound");++m->unsupported;return;}
+    m->delayed[m->delayed_length++]=(uint8_t)value;
+    if(m->delayed_phase==0) {
+        if(value&128){m->delay_end=m->delayed_length;m->delayed_phase=1;m->address_count=0;}
+    } else if(m->delayed_phase==1) {
+        if(m->address_count>=3){strcpy(m->error,"Invalid MA-3 delayed address");return;}
+        m->delayed_address|=(value&127)<<(7*m->address_count++);
+        if(value&128){m->address_end=m->delayed_length;m->delayed_phase=m->address_count==3?2:3;}
+    } else if(m->delayed_phase==2) {
+        if(m->delayed_count_bytes>=2){strcpy(m->error,"Invalid MA-3 delayed length");return;}
+        m->delayed_count|=(value&127)<<(7*m->delayed_count_bytes++);
+        if(value&128)m->delayed_phase=m->delayed_count?4:5;
+    } else if(m->delayed_phase==3) {if(value&128)m->delayed_phase=5;}
+    else if(m->delayed_phase==4) {if(m->delayed_count)--m->delayed_count;if(!m->delayed_count)m->delayed_phase=5;}
+    if(m->delayed_phase!=5)return;
+    mapped=m->address_count==3?m->delayed_address:translate_address(m->delayed_address);
+    if(mapped==UINT32_MAX){++m->unsupported;mapped=0x1df;}
+    if(m->hw) {
+        ma5_hw_write(m->hw,0,1);
+        for(i=0;i<m->delay_end;++i)ma5_hw_write(m->hw,1,m->delayed[i]);
+        if(m->address_count==3){for(i=m->delay_end;i<m->address_end;++i)ma5_hw_write(m->hw,1,m->delayed[i]);}
+        else {
+            if(mapped>=128){ma5_hw_write(m->hw,1,mapped&127);ma5_hw_write(m->hw,1,(mapped>>7)|128);}
+            else ma5_hw_write(m->hw,1,mapped|128);
+        }
+        /* Preserve the delay of an unsupported command with a hardware NOP. */
+        if(mapped==0x1df)ma5_hw_write(m->hw,1,128);
+        else for(i=m->address_end;i<m->delayed_length;++i)
+            ma5_hw_write(m->hw,1,m->address_count==3?m->delayed[i]:
+                translate_value(m->delayed_address+i-m->address_end,m->delayed[i]));
+        ++m->translated;
+    }
+    m->delayed_phase=m->delayed_length=m->delayed_address=m->delayed_count=m->delayed_count_bytes=0;
+}
+static void parameter_packet(Ma3 *m,unsigned value)
+{
+    unsigned mode=m->selector&63;value&=255;
+    if(mode!=2&&mode!=3)return;
+    if(mode==2&&m->packet_phase==3){m->packet_phase=m->address_bytes=m->length_bytes=0;m->packet_address=m->packet_length=0;}
+    if(m->packet_phase==0) {
+        if(m->address_bytes>=3){strcpy(m->error,"Invalid MA-3 immediate address");m->packet_phase=3;return;}
+        m->packet_address|=(value&127)<<(7*m->address_bytes++);
+        if(value&128) {
+            m->packet_phase=mode==3?2:m->address_bytes==3?1:2;
+            if(mode==2&&m->address_bytes==3&&m->hw) {
+                ma5_hw_write(m->hw,0,2);ma5_hw_write(m->hw,1,m->packet_address&127);
+                ma5_hw_write(m->hw,1,(m->packet_address>>7)&127);ma5_hw_write(m->hw,1,(m->packet_address>>14)|128);
+            }
+        }
+    } else if(m->packet_phase==1) {
+        if(m->length_bytes>=2){strcpy(m->error,"Invalid MA-3 immediate length");m->packet_phase=3;return;}
+        m->packet_length|=(value&127)<<(7*m->length_bytes++);
+        if(m->hw)ma5_hw_write(m->hw,1,value);
+        if(value&128)m->packet_phase=m->packet_length?2:3;
+    } else if(m->packet_phase==2) {
+        if(mode==3) {
+            /* MA-3 RBO is selected by the request's low seven bits. The
+               hardware DLL exposes only RBO1; MA-3 parameter reads use RBO3. */
+            unsigned mapped=translate_address(m->packet_address);
+            if(m->hw&&(value&127)==0&&(m->address_bytes==3||mapped!=UINT32_MAX)) {
+                m->response=ma5_hw_memory(m->hw,m->address_bytes==3?m->packet_address:mapped,m->address_bytes==3);
+                if(m->address_bytes!=3)m->response=translate_value(m->packet_address,m->response);
+                m->response_mask=0x10;m->response_selector=1;++m->ram_reads;
+            } else if(m->hw&&(value&127)==0&&m->packet_address>=0x14a&&m->packet_address<=0x151) {
+                unsigned cursor=ma5_hw_pcm_cursor(m->hw,m->packet_address-0x14a);
+                unsigned format=cursor>>24,offset=cursor&0xffff;
+                if(cursor==UINT32_MAX){strcpy(m->error,"Native PCM cursor layout is unavailable");return;}
+                offset=format==0?offset/2:format==1?offset*2:offset;
+                offset=(offset+0x20)&0x3ff;
+                m->response=0x40|(format<2?(offset>>4)&0x3e:(offset>>5)&0x1f);
+                m->response_mask=0x10;m->response_selector=1;++m->ram_reads;
+            } else if(m->packet_address<sizeof(m->parameter_ram)&&(value&127)<=2) {
+                m->response=m->parameter_ram[m->packet_address];m->response_mask=1u<<((value&127)+4);
+                m->response_selector=(value&127)+1;++m->ram_reads;
+            }
+            m->packet_phase=3;
+        } else {
+            if(m->packet_address<sizeof(m->parameter_ram))m->parameter_ram[m->packet_address]=(uint8_t)(m->address_bytes==3?value:value&127);
+            if(m->address_bytes==3){if(m->hw)ma5_hw_write(m->hw,1,value);}
+            else immediate_parameter(m,m->packet_address,value);
+            ++m->packet_address;
+            if(m->address_bytes==3){if(m->packet_length)--m->packet_length;if(!m->packet_length)m->packet_phase=3;}
+            else if(value&128)m->packet_phase=3;
+        }
+    }
+}
+static uint32_t read_ma3(void *ctx,uint32_t off,unsigned width)
+{
+    Ma3 *m=ctx;unsigned result=0;
+    if(width!=1||(off!=0&&off!=4)){bus_fault_access(m->bus,0,m->base+off,width,0,"MA-3 requires byte port access");return 0;}
+    ++m->reads;if(m->hw)result=ma5_hw_read(m->hw,off==4);
+    if(m->hw&&off==4&&(m->selector&63)==0&&m->bank==0) {
+        unsigned high;
+        ma5_hw_write(m->hw,0,0x10);high=ma5_hw_read(m->hw,1);
+        ma5_hw_write(m->hw,0,m->selector);result=guest_irq(result,high);
+    }
+    if(m->hw&&off==0)result|=m->response_mask;
+    /* Bits 4..6 acknowledge the selected read buffer, not its number.
+       ReceiveData selects RBO1/2/3 with 0x11/0x22/0x43. */
+    if(m->hw&&off==4&&(m->selector&15)==m->response_selector&&m->response_mask){result=m->response;m->response_mask=0;}
+    if(m->trace)fprintf(m->trace,"%llu %08x R %u %02x sel=%02x\n",(unsigned long long)m->bus->ticks,m->bus->pc,off,result,m->selector);
+    return result;
+}
+static void write_ma3(void *ctx,uint32_t off,unsigned width,uint32_t value)
+{
+    Ma3 *m=ctx;
+    if(width!=1||(off!=0&&off!=4)){bus_fault_access(m->bus,1,m->base+off,width,value,"MA-3 requires byte port access");return;}
+    ++m->writes;if(off==0) {
+        m->selector=value&255;
+        if((m->selector&63)==2||(m->selector&63)==3){m->packet_phase=m->address_bytes=m->length_bytes=0;m->packet_address=m->packet_length=0;}
+    }
+    else if((m->selector&63)==1||(m->selector&63)==2)++m->fifo_bytes;
+    if(off==4) {
+        if((m->selector&63)==4){if(value&128)reset_parameters(m);m->bank=value&3;}
+        if((m->selector&63)==1)delayed_packet(m,value);
+        parameter_packet(m,value);
+        if(m->hw&&(m->selector&63)==7&&m->bank==0) {
+            /* Experimental shared output/FM/PCM gain mapping. MA-5 resets
+               its synth gains to zero too. The MA-3 analog curve and separate
+               synth controls still need reverse engineering. Zero is mute. */
+            unsigned gain=(value&31)?(((value&31)*15/31)<<3)|2:0;
+            ma5_hw_register(m->hw,0x27,gain,m->bank);ma5_hw_register(m->hw,0x28,gain,m->bank);
+            ma5_hw_register(m->hw,0x29,gain,m->bank);ma5_hw_register(m->hw,0x2a,gain,m->bank);
+        }
+    }
+    if(m->trace)fprintf(m->trace,"%llu %08x W %u %02x sel=%02x\n",(unsigned long long)m->bus->ticks,m->bus->pc,off,value&255,m->selector);
+    if(m->hw) {
+        if(off==0)ma5_hw_write(m->hw,0,value);
+        else if((m->selector&63)==0&&m->bank==0) {
+            ma5_hw_register(m->hw,0x10,value&0x0c,m->bank);
+            ma5_hw_write(m->hw,0,m->selector);ma5_hw_write(m->hw,1,native_irq_low(value));
+        }
+        else if((m->selector&63)>3||(m->selector&63)==0) {
+            ma5_hw_write(m->hw,0,m->selector);ma5_hw_write(m->hw,1,value);
+        }
+    }
+}
+int ma3_attach(Ma3 *m,Bus *bus,Intc *intc,uint32_t base,uint32_t irq_mask,uint32_t sequence_quantum_ns)
+{
+    if(m->attached||!intc->attached||(base&3)||!irq_mask||!sequence_quantum_ns||sequence_quantum_ns>10000)return 0;
+    memset(m,0,sizeof(*m));m->bus=bus;m->intc=intc;m->base=base;m->irq_mask=irq_mask;
+    m->sequence_quantum_ns=sequence_quantum_ns;
+    if(!bus_device(bus,base,8,read_ma3,write_ma3,m))return 0;reset_parameters(m);m->attached=1;return 1;
+}
+int ma3_enable(Ma3 *m,const char *dll,const char *wav,int speakers,uint32_t ticks_hz)
+{
+    if(!m->attached||m->hw||ticks_hz<48000||ticks_hz>1000000000)return 0;
+    m->hw=ma5_hw_open(dll,wav,speakers,m->error,sizeof(m->error));if(!m->hw)return 0;
+    m->ticks_hz=ticks_hz;m->last_tick=m->bus->ticks;m->fractional=m->pending_frames=0;return 1;
+}
+void ma3_advance(Ma3 *m,uint64_t ticks)
+{
+    uint64_t scaled;
+    if(!m->hw)return;
+    scaled=m->fractional+(ticks-m->last_tick)*48000;m->last_tick=ticks;
+    m->pending_frames+=scaled/m->ticks_hz;m->fractional=scaled%m->ticks_hz;
+    /* Ten-millisecond blocks; the backend buffers host scheduling jitter. */
+    while(m->pending_frames>=480){unsigned count=480;
+        if(!ma5_hw_generate(m->hw,count)){strcpy(m->error,"Hardware PCM generation/output failed");return;}m->pending_frames-=count;}
+    if(ma5_hw_irq(m->hw)){m->intc->pending|=m->irq_mask;++m->irq_events;}
+}
+void ma3_destroy(Ma3 *m)
+{
+    if(m->hw)ma5_hw_close(m->hw);if(m->trace)fclose(m->trace);memset(m,0,sizeof(*m));
+}

@@ -10,6 +10,7 @@ typedef struct {
     uint32_t r[16], cpsr;
     uint32_t bank[6][2], spsr[6], user_hi[5], fiq_hi[5];
     uint64_t instructions, cycles;
+    uint64_t clock_cycles; /* ARM7 core cycles, excluding external memory waits. */
     uint32_t last_pc, last_opcode;
     int halted, irq, fiq;
     const char *error;

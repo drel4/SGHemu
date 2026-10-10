@@ -9,8 +9,10 @@
 /local/
 /SGHemu.7z
 /state/
+/models/**/state/
 *.dll
 *.mmf
+*.wav
 *.vma
 *.vmb
 *.rom

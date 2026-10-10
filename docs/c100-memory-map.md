@@ -162,7 +162,9 @@ passes this failure check for a firmware-accepted identity tuple, but the
 actual C100 revision values remain unconfirmed. The strict default model is
 unchanged.
 
-The CPU clock is still unknown. No 13 MHz multiple or TDMA tick is installed.
+At this stage the CPU clock was still unknown. Later [XEDK1 PLL analysis](c100-clock.md)
+established firmware-reported mode-2 clocks of ARM 23.4 MHz and DSP 46.8 MHz.
+Those physical rates are not yet used as calibrated interpreter timing.
 Next timing work must identify divider/timer writes and their source clock,
 then compare a measured reload period with the GSM frame. No MA-3 loop-mode
 bit has been identified yet.

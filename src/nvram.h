@@ -14,6 +14,8 @@ typedef struct {
 } NvramStore;
 /* Frontend-owned automatic persistence. Zero initialize; close before destroying
    the machine. Corrupt or locked saves fail closed, never silently reformat. */
+/* NULL selects <model config directory>/state/<firmware identity>.snv and
+   imports a validated legacy state/ save if no model-local save exists. */
 int nvram_store_open(NvramStore *s, Machine *m, const char *directory);
 int nvram_store_import(NvramStore *s, Machine *m, const char *path);
 int nvram_store_flush(NvramStore *s, Machine *m);

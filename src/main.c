@@ -1,6 +1,7 @@
 #include "machine.h"
 #include "firmware.h"
 #include "nvram.h"
+#include "userfs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,13 +15,16 @@ int main(int argc, char **argv)
     uint32_t until = 0;
     const char *model;
     const char *lcd_output = NULL;
+    const char *fs_output=NULL;
     const char *nv_input = NULL, *nv_output = NULL;
-    const char *state_directory = "state";
+    const char *state_directory = NULL; /* Default: model-local, firmware-hashed. */
+    const char *hardware_dll=NULL,*audio_wav=NULL;
+    uint32_t audio_ticks_hz=2166667;
     int persistent = 1, storage_ready = 0, sim_override = -1;
     FirmwareMatch *matches = NULL;
     unsigned first_argument = 2;
     FILE *trace = NULL, *access_log = NULL, *log;
-    if (argc < 2) { puts("sghemu MODEL.cfg | --folder PATH [instruction-budget] [--lcd-out FILE.bmp]\nOptions: --continue-unmapped --trace --mmio-trace --until ADDRESS\n         --nv-load FILE.snv --nv-save FILE.snv (diagnostic import/export)\n         --state-dir DIRECTORY --no-persist --sim present|none\nNVM auto-loads/saves in state/. Run from repo root; see build/unmapped.log."); return 2; }
+    if (argc < 2) { puts("sghemu MODEL.cfg | --folder PATH [instruction-budget] [--lcd-out FILE.bmp]\nOptions: --continue-unmapped --trace --mmio-trace --until ADDRESS\n         --nv-load FILE.snv --nv-save FILE.snv (diagnostic import/export)\n         --state-dir DIRECTORY --no-persist --sim present|none\n         --ma5-hw M5_EmuHw.dll [--audio-wav FILE.wav]\n         --audio-ticks-hz N (legacy profiles only, not CPU MHz)\n         --fs-list FILE.tsv (directory metadata, not file contents)\nNVM auto-loads/saves beside the model config in state/. Run from repo root; see build/unmapped.log."); return 2; }
     model = argv[1];
     if (!strcmp(model, "--folder")) {
         unsigned count;
@@ -33,7 +37,13 @@ int main(int argc, char **argv)
         if (count > 1) puts("CLI selects the first match; use the GUI to select another detected version.");
     }
     for (i = first_argument; i < (unsigned)argc; ++i) {
-        if (!strcmp(argv[i], "--continue-unmapped")) continuation = 1;
+        if (!strcmp(argv[i],"--ma5-hw")&&i+1<(unsigned)argc)hardware_dll=argv[++i];
+        else if(!strcmp(argv[i],"--audio-wav")&&i+1<(unsigned)argc)audio_wav=argv[++i];
+        else if(!strcmp(argv[i],"--audio-ticks-hz")&&i+1<(unsigned)argc) {
+            char *end;unsigned long hz=strtoul(argv[++i],&end,0);
+            if(*end||hz<48000||hz>100000000){fprintf(stderr,"Invalid audio instruction-tick rate\n");return 2;}audio_ticks_hz=(uint32_t)hz;
+        }
+        else if (!strcmp(argv[i], "--continue-unmapped")) continuation = 1;
         else if (!strcmp(argv[i], "--no-persist")) persistent = 0;
         else if (!strcmp(argv[i],"--sim") && i+1<(unsigned)argc) {
             const char *mode=argv[++i];
@@ -42,6 +52,7 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--state-dir") && i + 1 < (unsigned)argc) state_directory = argv[++i];
         else if (!strcmp(argv[i], "--lcd-out") && i + 1 < (unsigned)argc) lcd_output = argv[++i];
+        else if(!strcmp(argv[i],"--fs-list")&&i+1<(unsigned)argc)fs_output=argv[++i];
         else if (!strcmp(argv[i], "--nv-load") && i + 1 < (unsigned)argc) nv_input = argv[++i];
         else if (!strcmp(argv[i], "--nv-save") && i + 1 < (unsigned)argc) nv_output = argv[++i];
         else if (!strcmp(argv[i], "--mmio-trace")) mmio_trace = 1;
@@ -64,8 +75,18 @@ int main(int argc, char **argv)
     if (persistent && !nvram_store_open(&storage, &m, state_directory)) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
     storage_ready = 1;
     if (nv_input && !(persistent ? nvram_store_import(&storage, &m, nv_input) : nvram_load(&m, nv_input))) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
+    if(audio_wav&&!hardware_dll){fprintf(stderr,"--audio-wav requires --ma5-hw\n");result=1;goto done;}
+    if(hardware_dll) {
+        if(!ma3_enable(&m.ma3,hardware_dll,audio_wav,!audio_wav,m.clock.attached?1000000000:audio_ticks_hz)){fprintf(stderr,"MA-3 hardware: %s\n",m.ma3.error);result=1;goto done;}
+        m.ma3.trace=fopen("build/ma3-traffic.log","w");
+        if(!m.ma3.trace){result=1;goto done;}
+        if(m.clock.attached)puts("Direct Yamaha hardware: PLL/core-cycle emulated time, PCM 48000 Hz; no host sequencer");
+        else printf("Direct Yamaha hardware: %u instruction ticks/sec, PCM 48000 Hz; no host sequencer\n",audio_ticks_hz);
+    }
     if (storage.active) printf("Persistent NVM: %s%s\n", storage.path, storage.provision ? " (first-boot guest provisioning)" : "");
-    if (m.bringup) { continuation = 1; puts("Experimental bring-up: inferred handoff state and fixed-instruction frame IRQ source; unknown MMIO continues."); }
+    if (m.bringup) { continuation = 1; puts(m.periodic_time?
+        "Experimental bring-up: inferred handoff state and emulated-time frame IRQ source; unknown MMIO continues.":
+        "Experimental bring-up: inferred handoff state and instruction-tick frame IRQ source; unknown MMIO continues."); }
     printf("Model: %s\n", m.name);
     if (m.unplaced_rom) printf("Second image: %s (%zu bytes, guest address unresolved)\n", m.unplaced_path, m.unplaced_size);
     if (mmio_trace) {
@@ -85,6 +106,7 @@ int main(int argc, char **argv)
                 !nvram_store_open(&storage, &m, state_directory)) { fprintf(stderr, "%s\n", m.error); storage_ready = 0; result = 1; break; }
             storage.defaults_boot = initialize_defaults;
             if(sim_override>=0)m.sim.present=sim_override;
+            if(hardware_dll&&!ma3_enable(&m.ma3,hardware_dll,audio_wav,!audio_wav,m.clock.attached?1000000000:audio_ticks_hz)){fprintf(stderr,"MA-3 hardware: %s\n",m.ma3.error);result=1;break;}
             if (access_log) { m.bus.access_log = access_log; m.bus.watch_start = 0x40000; m.bus.watch_end = 0x42000; }
             continue;
         }
@@ -94,12 +116,24 @@ int main(int argc, char **argv)
     }
     printf("instructions=%llu scheduler_ticks=%llu PC=%08x CPSR=%08x unmapped/ROM-faults=%llu\n",
         (unsigned long long)m.cpu.instructions, (unsigned long long)m.cpu.cycles, m.cpu.r[15], m.cpu.cpsr, (unsigned long long)m.bus.faults);
+    if(m.clock.attached)printf("PLL: ARM=%u Hz DSP=%u Hz core-cycles=%llu emulated-time=%.6f seconds%s\n",
+        m.clock.arm_hz,m.clock.dsp_hz,(unsigned long long)m.cpu.clock_cycles,(double)m.clock.nanoseconds/1000000000.0,
+        m.clock.unknown?" (unrecognized divider)":"");
     if (m.lcd.attached) printf("LCD display=%s commands=%llu pixel_writes=%llu; IRQ events=%llu\n", m.lcd.enabled ? "on" : "off",
         (unsigned long long)m.lcd.commands, (unsigned long long)m.lcd.writes, (unsigned long long)m.intc.events);
     if (m.cpu.error) fprintf(stderr, "STOP PC=%08x opcode=%08x: %s\n", m.cpu.last_pc, m.cpu.last_opcode, m.cpu.error);
     if(m.sim.attached)printf("SIM: %s, resets=%llu APDUs=%llu RX=%llu TX=%llu DMA=%llu\n",m.sim.present?"synthetic card inserted":"removed",
         (unsigned long long)m.sim.resets,(unsigned long long)m.sim.card.commands,(unsigned long long)m.sim.received,
         (unsigned long long)m.sim.transmitted,(unsigned long long)m.sim.dma_bytes);
+    if(m.ma3.hw) {Ma5HwStats stats=ma5_hw_stats(m.ma3.hw);
+        printf("MA-3: reads=%llu writes=%llu FIFO=%llu IRQ=%llu; PCM frames=%llu nonzero=%llu peak=%u host-underruns=%llu%s\n",
+            (unsigned long long)m.ma3.reads,(unsigned long long)m.ma3.writes,(unsigned long long)m.ma3.fifo_bytes,
+            (unsigned long long)m.ma3.irq_events,(unsigned long long)stats.frames,(unsigned long long)stats.nonzero,stats.peak,
+            (unsigned long long)stats.underruns,stats.failed?" FAILED":"");
+        printf("MA-3 compatibility: RAM reads=%llu translated=%llu unsupported=%llu partial FIFO=%u\n",
+            (unsigned long long)m.ma3.ram_reads,(unsigned long long)m.ma3.translated,(unsigned long long)m.ma3.unsupported,m.ma3.delayed_length);
+        if(stats.failed)result=1;
+    }
     for (i = 0; i < m.flash_count; ++i) printf("Flash %08x: programs=%llu erases=%llu last_program=%08x last_erase=%08x\n",
         m.flashes[i].base, (unsigned long long)m.flashes[i].programs, (unsigned long long)m.flashes[i].erases,
         m.flashes[i].last_program, m.flashes[i].last_erase);
@@ -107,6 +141,11 @@ int main(int argc, char **argv)
         (unsigned long long)m.irom.services[i].calls, m.irom.services[i].kind == IROM_VERSION ? " (caller-specific version query; no BIST results)" : " (memcpy)");
     if (lcd_output && (!m.lcd.attached || !lcd_save_bmp(&m.lcd, lcd_output))) { fprintf(stderr, "Cannot save LCD framebuffer.\n"); result = 1; }
     if (nv_output && !nvram_save(&m, nv_output)) { fprintf(stderr, "%s\n", m.error); result = 1; }
+    if(fs_output){UserDirectory directory;
+        if(!userfs_directory(&m,&directory)){fprintf(stderr,"Phone filesystem: %s\n",directory.error);result=1;}
+        else if(!userfs_export_directory(&directory,fs_output)){fprintf(stderr,"Cannot export phone file directory.\n");result=1;}
+        else printf("Phone filesystem: %u files, %llu listed bytes; directory exported to %s\n",directory.count,(unsigned long long)directory.listed_bytes,fs_output);
+    }
     if (m.bus.fault) puts("Stopped on unknown hardware; see build/unmapped.log. This is not a successful phone boot.");
 done:
     if (storage_ready && !nvram_store_flush(&storage, &m)) { fprintf(stderr, "%s\n", m.error); result = 1; }

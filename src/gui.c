@@ -11,6 +11,7 @@
 #include "machine.h"
 #include "firmware.h"
 #include "nvram.h"
+#include "userfs.h"
 #define ID_OPEN_MODEL 100
 #define ID_OPEN_ROM 101
 #define ID_RESET 102
@@ -18,11 +19,17 @@
 #define ID_OPEN_SECOND 104
 #define ID_OPEN_FOLDER 105
 #define ID_NV_LOAD 106
+#define ID_USERFS 107
+#define ID_FS_REFRESH 300
+#define ID_FS_DIRECTORY 301
+#define ID_FS_BACKUP 302
 #define ID_RUN 110
 #define ID_PAUSE 111
 #define ID_STEP 112
 #define ID_CONTINUE 113
 #define ID_SIM 114
+#define ID_AUDIO 115
+#define ID_AUDIO_IMPORT 116
 #define ID_PATTERN 120
 #define ID_ZOOM1 121
 #define ID_ZOOM2 122
@@ -36,6 +43,8 @@ typedef struct {
     NvramStore storage;
     DWORD nv_checkpoint;
     HWND window, buttons[SGH_MAX_KEYS], diagnostics, diagnostic_edit;
+    HWND fs_window,fs_list,fs_status;
+    UserDirectory fs_directory;
     HFONT font;
     FILE *log;
     char model[1024], rom[1024], second_rom[1024], nv_input[1024];
@@ -45,8 +54,12 @@ typedef struct {
     int vk_keys[256], running, continuation, pattern, menu_active, sim_override;
     const char *state;
     unsigned last_key;
+    char audio_dll[1024], audio_settings[1024];
+    uint32_t audio_ticks_hz;
+    int audio_enabled, audio_paused;
 } App;
 static App app;
+#include "gui_fs.inc"
 static const char *key_names[SGH_MAX_KEYS] = {
     "Soft left", "Up", "Soft right", "Left", "OK", "Right", "Call", "Down", "End",
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#", "C / Back"
@@ -84,6 +97,24 @@ static void update_diagnostics(void)
             f->base, (unsigned long long)f->programs, (unsigned long long)f->erases, f->last_program, f->last_erase);
     }
     if (length < sizeof(text)) length += (size_t)snprintf(text + length, sizeof(text) - length,
+        "\r\nMA-3 audio: %s; timebase %u %s/sec; FIFO bytes %llu, IRQs %llu\r\n"
+        "Audio error: %s\r\n",
+        app.m.ma3.hw?"experimental hardware":"silent", app.m.clock.attached?1000000000:app.audio_ticks_hz,
+        app.m.clock.attached?"nanoseconds":"instruction ticks",
+        (unsigned long long)app.m.ma3.fifo_bytes,(unsigned long long)app.m.ma3.irq_events,
+        *app.m.ma3.error?app.m.ma3.error:"none");
+    if(app.m.clock.attached&&length<sizeof(text))length+=(size_t)snprintf(text+length,sizeof(text)-length,
+        "PLL: ARM %u Hz / DSP %u Hz; core cycles %llu; time %.3f s%s\r\n",
+        app.m.clock.arm_hz,app.m.clock.dsp_hz,(unsigned long long)app.m.cpu.clock_cycles,
+        (double)app.m.clock.nanoseconds/1000000000.0,app.m.clock.unknown?" (unrecognized divider)":"");
+    if (app.m.ma3.hw && length < sizeof(text)) {
+        Ma5HwStats stats=ma5_hw_stats(app.m.ma3.hw);
+        length += (size_t)snprintf(text + length,sizeof(text)-length,
+            "PCM frames %llu, nonzero samples %llu, peak %u, host underruns %llu\r\n",
+            (unsigned long long)stats.frames,(unsigned long long)stats.nonzero,stats.peak,
+            (unsigned long long)stats.underruns);
+    }
+    if (length < sizeof(text)) length += (size_t)snprintf(text + length, sizeof(text) - length,
         "\r\nSIM: %s; resets %llu, APDUs %llu, RX %llu, TX %llu, DMA bytes %llu\r\n",
         app.m.sim.attached ? (app.m.sim.present ? "synthetic card inserted" : "removed") : "not mapped",
         (unsigned long long)app.m.sim.resets,(unsigned long long)app.m.sim.card.commands,
@@ -92,7 +123,7 @@ static void update_diagnostics(void)
         "\r\nSee build/gui-unmapped.log for every unknown access.\r\n"
         "LCD output comes only from guest command/data writes. Keypad scanning/debounce runs in firmware.\r\n"
         "Diagnostic continuation returns zero on unknown reads and drops writes.\r\n"
-        "One instruction = one scheduler tick; not calibrated phone time.");
+        "Clock-enabled profiles use core-cycle time; external bus waits remain uncalibrated.");
     SetWindowTextA(app.diagnostic_edit, text);
 }
 static void update_ui(void)
@@ -102,6 +133,10 @@ static void update_ui(void)
     CheckMenuItem(menu, ID_CONTINUE, MF_BYCOMMAND | (app.continuation ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, ID_PATTERN, MF_BYCOMMAND | (app.pattern ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, ID_SIM, MF_BYCOMMAND | (app.m.sim.present ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu, ID_AUDIO, MF_BYCOMMAND | (app.audio_enabled ? MF_CHECKED : MF_UNCHECKED));
+    if (app.m.ma3.hw && app.audio_paused != !app.running) {
+        ma5_hw_pause(app.m.ma3.hw, !app.running); app.audio_paused = !app.running;
+    }
     EnableMenuItem(menu, ID_SIM, MF_BYCOMMAND | (app.m.sim.attached ? MF_ENABLED : MF_GRAYED));
     CheckMenuRadioItem(menu, ID_ZOOM1, ID_ZOOM3, ID_ZOOM1 + app.zoom - 1, MF_BYCOMMAND);
     EnableMenuItem(menu, ID_RUN, MF_BYCOMMAND | (app.m.loaded && !app.running && !app.m.cpu.halted ? MF_ENABLED : MF_GRAYED));
@@ -165,8 +200,9 @@ static void layout(void)
     app.lcd.right = app.lcd.left + screen;
     app.lcd.bottom = (int)(app.m.loaded ? app.m.height : 128) * (int)app.zoom;
     grid_y = app.lcd.bottom + 4; button_width = (width - 8) / 3;
-    for (i = 0; i < 21; ++i) MoveWindow(app.buttons[i], 2 + (i % 3) * (button_width + 2), grid_y + (i / 3) * 36, button_width, 34, TRUE);
-    MoveWindow(app.buttons[21], 2, grid_y + 252, width - 4, 34, TRUE);
+    for (i = 0; i < 21; ++i) MoveWindow(app.buttons[i], 2 + (i % 3) * (button_width + 2),
+        grid_y + ((i / 3) + (i >= 9 ? 1 : 0)) * 36, button_width, 34, TRUE);
+    MoveWindow(app.buttons[21], 2, grid_y + 108, width - 4, 34, TRUE);
     InvalidateRect(app.window, NULL, FALSE);
 }
 static void fit_window(void)
@@ -218,7 +254,7 @@ static int load_model(void)
     } else {
         app.state = "Paused - ready"; app.continuation = app.m.bringup;
         if (app.sim_override >= 0 && app.m.sim.attached) app.m.sim.present = app.sim_override;
-        if (!nvram_store_open(&app.storage, &app.m, "state") ||
+        if (!nvram_store_open(&app.storage, &app.m, NULL) ||
             (*app.nv_input && !nvram_store_import(&app.storage, &app.m, app.nv_input))) {
             app.state = "Paused - NVM storage rejected";
             app.m.cpu.halted = 1; app.m.cpu.error = "Persistent NVM error; see diagnostics";
@@ -226,6 +262,15 @@ static int load_model(void)
         }
         *app.nv_input = 0;
         app.nv_checkpoint = GetTickCount();
+        if (app.audio_enabled && app.m.ma3.attached && !app.m.cpu.halted) {
+            if (!ma3_enable(&app.m.ma3, app.audio_dll, NULL, 1, app.m.clock.attached?1000000000:app.audio_ticks_hz)) {
+                MessageBoxA(app.window, app.m.ma3.error, "SGHemu - hardware audio unavailable", MB_OK | MB_ICONERROR);
+                *app.m.ma3.error=0; app.audio_enabled=0;
+            } else {
+                app.audio_paused=0;
+                app.m.ma3.trace=fopen("build/gui-ma3-traffic.log","w");
+            }
+        }
     }
     free(app.test_pixels); app.test_pixels = NULL; app.pattern = 0;
     if (app.m.loaded) {
@@ -328,6 +373,23 @@ static LRESULT CALLBACK diagnostics_proc(HWND window, UINT message, WPARAM wpara
     if (message == WM_DESTROY) { app.diagnostics = app.diagnostic_edit = NULL; return 0; }
     return DefWindowProcA(window, message, wparam, lparam);
 }
+static void import_audio(void)
+{
+    OPENFILENAMEA ofn={0}; char path[1024]={0};
+    app.running=0; app.state="Paused"; update_ui();
+    ofn.lStructSize=sizeof(ofn);ofn.hwndOwner=app.window;
+    ofn.lpstrFilter="Yamaha hardware DLL (M5_EmuHw.dll)\0M5_EmuHw.dll\0All files\0*.*\0";
+    ofn.lpstrFile=path;ofn.nMaxFile=sizeof(path);
+    ofn.lpstrTitle="Import pinned Yamaha hardware DLL - experimental MA-3 audio";
+    ofn.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
+    if(!GetOpenFileNameA(&ofn))return;
+    strcpy(app.audio_dll,path);app.audio_enabled=1;
+    if(load_model()) {
+        CreateDirectoryA("state",NULL);
+        WritePrivateProfileStringA("audio","hardware_dll",path,app.audio_settings);
+        WritePrivateProfileStringA("audio","enabled",app.audio_enabled?"1":"0",app.audio_settings);
+    }
+}
 static void command(unsigned id)
 {
     switch (id) {
@@ -336,6 +398,16 @@ static void command(unsigned id)
     case ID_OPEN_SECOND: choose_file(2); break;
     case ID_OPEN_FOLDER: choose_folder(); break;
     case ID_RESET: load_model(); break;
+    case ID_AUDIO_IMPORT: import_audio(); break;
+    case ID_AUDIO:
+        if (!app.audio_enabled && !*app.audio_dll) import_audio();
+        else {
+            app.audio_enabled=!app.audio_enabled;
+            load_model();
+            CreateDirectoryA("state",NULL);
+            WritePrivateProfileStringA("audio","enabled",app.audio_enabled?"1":"0",app.audio_settings);
+        }
+        break;
     case ID_SIM:
         if (app.m.sim.attached && save_storage()) {
             int running=app.running,previous=app.sim_override;
@@ -346,6 +418,10 @@ static void command(unsigned id)
         }
         break;
     case ID_NV_LOAD: choose_nvram(); break;
+    case ID_USERFS:
+        if(!app.fs_window)CreateWindowExA(0,"SGHemuFilesystem","SGHemu - phone filesystem manager",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VISIBLE,
+            CW_USEDEFAULT,CW_USEDEFAULT,578,432,app.window,NULL,GetModuleHandleA(NULL),NULL);
+        else {fs_refresh();ShowWindow(app.fs_window,SW_RESTORE);SetForegroundWindow(app.fs_window);}break;
     case ID_RUN:
         if (app.m.loaded && !app.m.cpu.halted) { app.running = 1; app.state = "Running"; }
         break;
@@ -380,7 +456,8 @@ static void command(unsigned id)
             "F5 Run, F6 Pause, F10 Step, Ctrl+R Reset.\n\n"
             "Open a firmware folder (Ctrl+O) to identify and boot a supported ROM pair.\n"
             "LCD pixels and keypad scanning are handled by the guest firmware.\n"
-            "Audio is currently silent in the emulator; MA-5 has a separate probe.", "About SGHemu", MB_OK | MB_ICONINFORMATION);
+            "Experimental hardware audio: import M5_EmuHw.dll from the Emulation menu.\n"
+            "MA-3 translation and instruction timing are not fully calibrated.", "About SGHemu", MB_OK | MB_ICONINFORMATION);
         break;
     case ID_EXIT: SendMessageA(app.window, WM_CLOSE, 0, 0); return;
     default:
@@ -391,6 +468,7 @@ static void command(unsigned id)
         break;
     }
     if (app.log) fflush(app.log);
+    if(app.fs_window)fs_refresh();
     update_ui();
 }
 static HMENU make_menu(void)
@@ -399,12 +477,16 @@ static HMENU make_menu(void)
     AppendMenuA(file, MF_STRING, ID_OPEN_FOLDER, "Open &firmware folder...\tCtrl+O");
     AppendMenuA(file, MF_STRING, ID_OPEN_MODEL, "Open &model config (advanced)...");
     AppendMenuA(file, MF_STRING, ID_NV_LOAD, "Import NVM snapshot and reset...");
+    AppendMenuA(file, MF_STRING, ID_USERFS, "Phone filesystem manager...");
     AppendMenuA(file, MF_STRING, ID_RESET, "&Reset\tCtrl+R"); AppendMenuA(file, MF_SEPARATOR, 0, NULL);
     AppendMenuA(file, MF_STRING, ID_EXIT, "E&xit");
     AppendMenuA(emulation, MF_STRING, ID_RUN, "&Run\tF5"); AppendMenuA(emulation, MF_STRING, ID_PAUSE, "&Pause\tF6");
     AppendMenuA(emulation, MF_STRING, ID_STEP, "&Step instruction\tF10"); AppendMenuA(emulation, MF_SEPARATOR, 0, NULL);
     AppendMenuA(emulation, MF_STRING, ID_CONTINUE, "Diagnostic: continue &unknown accesses");
     AppendMenuA(emulation, MF_STRING, ID_SIM, "Virtual &SIM inserted (reset)");
+    AppendMenuA(emulation, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(emulation, MF_STRING, ID_AUDIO, "Experimental hardware &audio (reset)");
+    AppendMenuA(emulation, MF_STRING, ID_AUDIO_IMPORT, "Import Yamaha hardware DLL...");
     AppendMenuA(view, MF_STRING, ID_ZOOM1, "LCD zoom &1x"); AppendMenuA(view, MF_STRING, ID_ZOOM2, "LCD zoom &2x"); AppendMenuA(view, MF_STRING, ID_ZOOM3, "LCD zoom &3x");
     AppendMenuA(view, MF_SEPARATOR, 0, NULL); AppendMenuA(view, MF_STRING, ID_PATTERN, "LCD &test pattern"); AppendMenuA(view, MF_STRING, ID_DIAGNOSTICS, "&Diagnostics...");
     AppendMenuA(help, MF_STRING, ID_ABOUT, "&About / keyboard controls...");
@@ -432,8 +514,13 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
     if (message == WM_TIMER) {
         if (app.running) {
             DWORD start = GetTickCount();
-            unsigned i;
-            for (i = 0; i < 40000; ++i) {
+            unsigned i, limit=app.m.ma3.hw?(app.m.clock.attached?1000000:app.audio_ticks_hz/10):120000;
+            DWORD budget=app.m.ma3.hw?32:8;
+            /* Audio backpressure provides pacing. A fixed 40k/16ms batch
+               cannot sustain the chip when WM_TIMER is coalesced or rounded.
+               Allow a bounded refill burst, without changing guest clocks. */
+            if(limit<40000)limit=40000;if(limit>1000000)limit=1000000;
+            for (i = 0; i < limit; ++i) {
                 int provision = nvram_store_step(&app.storage, &app.m);
                 if (!provision) {
                     app.running = 0; app.state = "Paused - first-boot provisioning failed";
@@ -449,7 +536,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
                     break;
                 }
                 if (!machine_step(&app.m, app.continuation)) { app.running = 0; app.state = app.m.cpu.halted ? "CPU stopped - see diagnostics" : "Unknown hardware - stopped"; break; }
-                if (!(i % 1000) && GetTickCount() - start >= 8) break;
+                if (!(i % 1000) && GetTickCount() - start >= budget) break;
             }
             if (GetTickCount() - app.nv_checkpoint >= 5000) {
                 app.nv_checkpoint = GetTickCount(); (void)save_storage();
@@ -479,6 +566,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
     }
     if (message == WM_DESTROY) {
         KillTimer(window, 1); if (app.diagnostics) DestroyWindow(app.diagnostics);
+        if(app.fs_window)DestroyWindow(app.fs_window);
         nvram_store_release(&app.storage);
         machine_destroy(&app.m); free(app.test_pixels); if (app.log) fclose(app.log);
         if (app.font) DeleteObject(app.font); PostQuitMessage(0); return 0;
@@ -488,7 +576,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, int show)
 {
     WNDCLASSEXA cls = {0};
-    INITCOMMONCONTROLSEX common = {sizeof(common), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES};
+    INITCOMMONCONTROLSEX common = {sizeof(common), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES|ICC_LISTVIEW_CLASSES};
     MSG message;
     HACCEL accelerator;
     ACCEL keys[] = {{FVIRTKEY | FCONTROL, 'O', ID_OPEN_FOLDER}, {FVIRTKEY | FCONTROL, 'R', ID_RESET},
@@ -505,6 +593,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
         }
     }
     CreateDirectoryA("build", NULL);
+    GetFullPathNameA("state/audio.ini",sizeof(app.audio_settings),app.audio_settings,NULL);
+    GetPrivateProfileStringA("audio","hardware_dll","",app.audio_dll,sizeof(app.audio_dll),app.audio_settings);
+    app.audio_enabled=GetPrivateProfileIntA("audio","enabled",0,app.audio_settings)!=0;
+    app.audio_ticks_hz=GetPrivateProfileIntA("audio","ticks_hz",2166667,app.audio_settings);
+    if(app.audio_ticks_hz<48000||app.audio_ticks_hz>100000000)app.audio_ticks_hz=2166667;
     InitCommonControlsEx(&common);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     strcpy(app.model, "models/c100/c100xeda2.cfg"); app.zoom = 2; app.state = "Paused"; app.last_key = SGH_MAX_KEYS;
@@ -514,6 +607,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     if (!RegisterClassExA(&cls)) return 1;
     cls.lpszClassName = "SGHemuDiagnostics"; cls.lpfnWndProc = diagnostics_proc;
     if (!RegisterClassExA(&cls)) return 1;
+    cls.lpszClassName="SGHemuFilesystem";cls.lpfnWndProc=filesystem_proc;
+    if(!RegisterClassExA(&cls))return 1;
     if (!CreateWindowExA(0, "SGHemuWindow", "SGHemu - Samsung SGH-C100", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 400, 800, NULL, NULL, instance, NULL)) return 1;
     accelerator = CreateAcceleratorTableA(keys, sizeof(keys) / sizeof(keys[0]));

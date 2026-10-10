@@ -109,7 +109,9 @@ int main(void)
         CHECK(nvram_store_step(&store, &m) == 1 && store.stage == 2);
         CHECK(nvram_store_flush(&store, &m)); CHECK(GetFileAttributesA(stored) == INVALID_FILE_ATTRIBUTES);
         CHECK(machine_step(&m, 0)); CHECK(machine_step(&m, 0)); instructions = m.cpu.instructions;
+        m.cpu.clock_cycles=123456;
         CHECK(nvram_store_step(&store, &m) == 2 && store.stage == 3 && store.saved);
+        CHECK(m.cpu.clock_cycles==123456);
         CHECK(m.cpu.r[4] == 0x87654321 && m.cpu.instructions == instructions && m.cpu.r[15] == m.nv_trigger);
         nvram_store_release(&store);
         CHECK(machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
@@ -133,6 +135,26 @@ int main(void)
         CHECK(!machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
         config("nvram=0x1000020,0xffe0\nnv_provision=0x1000004,0x1000040,0x100000c\n");
         CHECK(!machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
+    }
+    /* Default placement follows the model config, with a genuine save/reload. */
+    {
+        NvramStore store={0};char model_save[1024],legacy[1024],*name;
+        config("nvram=0x1000020,0xffe0\n");
+        CHECK(machine_load(&m,"build/nv-fixture.cfg",NULL,NULL));
+        CHECK(nvram_store_open(&store,&m,NULL));
+        CHECK(!strncmp(store.path,"build/state/",12));strcpy(model_save,store.path);
+        m.nvram_data[123]=0x42;CHECK(nvram_store_flush(&store,&m));nvram_store_release(&store);
+        CHECK(machine_load(&m,"build/nv-fixture.cfg",NULL,NULL));
+        CHECK(nvram_store_open(&store,&m,NULL));CHECK(m.nvram_data[123]==0x42);
+        nvram_store_release(&store);
+        /* Migration must import the checked legacy snapshot, leaving it intact. */
+        name=strrchr(model_save,'/');CHECK(name!=NULL);
+        snprintf(legacy,sizeof(legacy),"state/%s",name+1);CreateDirectoryA("state",NULL);
+        CHECK(nvram_save(&m,legacy));CHECK(DeleteFileA(model_save));
+        CHECK(machine_load(&m,"build/nv-fixture.cfg",NULL,NULL));
+        CHECK(nvram_store_open(&store,&m,NULL));CHECK(store.saved&&!store.provision);
+        CHECK(m.nvram_data[123]==0x42);CHECK(GetFileAttributesA(legacy)!=INVALID_FILE_ATTRIBUTES);
+        nvram_store_release(&store);CHECK(DeleteFileA(model_save));CHECK(DeleteFileA(legacy));
     }
     machine_destroy(&m);
     printf("NVM snapshot validation: %u checks passed.\n", checks); return 0;

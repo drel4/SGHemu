@@ -49,7 +49,7 @@ and old-bank writeback before LDM exception return have explicit tests.
 ## Tests and real-image check
 
 `build.cmd` builds and runs `tests/cpu_test.c` with `/std:c17 /W4 /WX /RTC1`.
-211 assertions verify small instruction programs and invariants including
+255 assertions verify small instruction programs and invariants including
 overflow/carry/borrow, failed condition codes, shifts, signed loads, unaligned
 word loads, multiplication, block transfers, bank switching, PSR permissions,
 SWI, IRQ/FIQ return, ARM/Thumb interworking and rejection of ARMv5-only forms.

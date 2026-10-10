@@ -106,8 +106,26 @@ static void faults(void)
     setup(); word(0, 0xe12fff30); CHECK(!arm7_step(&cpu) && cpu.halted); /* ARMv5 BLX must not execute as data processing */
     setup(); cpu.cpsr |= ARM_T; half(0, 0xbe00); CHECK(!arm7_step(&cpu)); /* ARMv5 BKPT */
 }
+static void clock_timing(void)
+{
+    uint64_t previous;
+    setup();run_arm(0xe3a00001);CHECK(cpu.clock_cycles==1);
+    previous=cpu.clock_cycles;run_arm(0xea000000);CHECK(cpu.clock_cycles-previous==3);
+    previous=cpu.clock_cycles;cpu.cpsr&=~ARM_Z;run_arm(0x05901000);CHECK(cpu.clock_cycles-previous==1);
+    previous=cpu.clock_cycles;cpu.r[0]=0x100;run_arm(0xe5901000);CHECK(cpu.clock_cycles-previous==3);
+    previous=cpu.clock_cycles;run_arm(0xe5801000);CHECK(cpu.clock_cycles-previous==2);
+    previous=cpu.clock_cycles;cpu.r[0]=3;cpu.r[1]=7;run_arm(0xe0020190);CHECK(cpu.clock_cycles-previous==2);
+    previous=cpu.clock_cycles;cpu.r[1]=0x12345678;run_arm(0xe0020190);CHECK(cpu.clock_cycles-previous==5);
+    previous=cpu.clock_cycles;cpu.r[0]=0x100;run_arm(0xe8900006);CHECK(cpu.clock_cycles-previous==4);
+    setup();previous=cpu.clock_cycles;cpu.r[0]=0x100;run_thumb(0x6801);CHECK(cpu.clock_cycles-previous==3);
+    previous=cpu.clock_cycles;run_thumb(0x6001);CHECK(cpu.clock_cycles-previous==2);
+    previous=cpu.clock_cycles;run_thumb(0xe7fe);CHECK(cpu.clock_cycles-previous==3);
+    previous=cpu.clock_cycles;cpu.cpsr&=~ARM_Z;run_thumb(0xd000);CHECK(cpu.clock_cycles-previous==1);
+    previous=cpu.clock_cycles;cpu.cpsr|=ARM_Z;run_thumb(0xd000);CHECK(cpu.clock_cycles-previous==3);
+    previous=cpu.clock_cycles;cpu.irq=1;cpu.cpsr&=~0x80u;step();CHECK(cpu.clock_cycles-previous==3);
+}
 int main(void)
 {
-    arithmetic(); memory_ops(); control_and_banks(); thumb_programs(); faults();
+    arithmetic(); memory_ops(); control_and_banks(); thumb_programs(); faults();clock_timing();
     printf("ARM7TDMI: %u checks passed (instruction programs, flags, memory, banks, IRQ/FIQ, interworking).\n", checks); return 0;
 }

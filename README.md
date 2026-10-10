@@ -18,8 +18,9 @@ The C100 firmware now reaches **normal standby with a virtual SIM**, showing
 Pixels come from the guest's x16 LCD writes, not an extracted asset or host UI.
 C100XEDA2, C100XEDD1 and C100XEDK1 have all passed SIM initialization and
 standby captures. This is experimental hardware bring-up, not a complete phone:
-unknown MMIO still continues, clocks are uncalibrated, and MA-3 audio is not
-connected. The guest keypad matrix is connected. The default strict profile still stops on unknown
+unknown MMIO still continues and clocks are uncalibrated. Experimental MA-3
+translation now renders guest startup audio through the MA-5 hardware DLL;
+volume/configuration compatibility remains incomplete. The guest keypad matrix is connected. The default strict profile still stops on unknown
 hardware; folder import selects the documented bring-up profile.
 
 Implemented: shared ARM7TDMI ARM/Thumb interpreter, ROM/RAM/config loader,
@@ -51,7 +52,9 @@ For an optimized x86 build with the C runtime linked statically, run
 Release ZIPs contain the GUI, CLI, firmware-inspection and standalone audio
 tools, model configs, and documentation. Extract the whole archive and launch
 `build/sghemu-gui.exe`; keep the supplied directory layout. Firmware and Yamaha
-DLLs must be supplied separately. Emulator audio is currently silent.
+DLLs must be supplied separately. The v0.2.0 build adds opt-in experimental
+hardware audio; v0.1.0 was silent. Playback can still run too fast, especially
+after ringtone changes and in games; this release does not fix that issue.
 
 In the GUI use **File > Open firmware folder (Ctrl+O)**. Pick the folder containing
 both firmware files, or a parent folder containing several sets. Exact SHA-256
@@ -64,9 +67,12 @@ the top menu. F5 runs, F6 pauses, F10 steps, Ctrl+R resets (paused). State and
 hardware counters are in View > Diagnostics. Buttons drive the firmware-scanned
 keypad matrix. See [GUI controls](docs/native-gui.md) and [keypad mapping](docs/c100-keypad.md).
 **Emulation > Virtual SIM inserted (reset)** toggles the card with a cold reset.
+**Emulation > Import Yamaha hardware DLL...** enables experimental audio;
+select the pinned `M5_EmuHw.dll`, then press F5. Settings live in `state/audio.ini`.
 Its synthetic identity is configured in `models/c100/sim/test-sim.cfg`.
-NVM automatically loads/saves under ignored `state/`, separated by firmware
-hashes and memory map. No manual Save command is needed. First boot takes
+NVM automatically loads/saves under ignored `models/<model>/state/`, separated by firmware
+hashes and memory map. Valid legacy `state/` saves migrate automatically without deleting the originals.
+No manual Save command is needed. First boot takes
 longer while the guest formats storage, then resets and boots normally.
 File > Import NVM snapshot and reset remains for importing existing `.snv`
 files; press F5 afterward. ROM files are never modified.
@@ -101,8 +107,9 @@ reload/run. Flash changes affect host-owned emulated memory only, not ROM files.
 
 ## Verification
 
-`build.cmd` runs 211 CPU/bus, 89 machine, 100 peripheral, 24 firmware-folder,
-138 NVM snapshot/persistence, 43 keypad, 73 internal-ROM HLE and 135 SIM checks (**813 total**) using synthetic
+`build.cmd` runs 255 CPU/bus, 118 machine, 100 peripheral, 24 firmware-folder,
+158 NVM snapshot/persistence, 43 keypad, 73 internal-ROM HLE, 135 SIM,
+215 MA-3 and 20 filesystem checks (**1,141 total**) using synthetic
 fixtures (no proprietary inputs required). Optional real-ROM
 regressions, compiled by the same build:
 
@@ -126,9 +133,17 @@ pinned; other binaries are rejected. See [audio evidence](docs/ma5-audio.md) and
 .\build\ma5probe.exe MA5libs build/c100-embedded-voice.mmf 10 1000000
 ```
 
-The dedicated audio thread owns all DLL calls and playback buffers. The emulator
-still uses the silent interface; the MA-3 FIFO/commands, duration interrupts and
-clock synchronization remain future work. DLL download requires explicit consent;
+The emulator's experimental hardware route consumes the guest's timed FIFO
+packets, translates MA-3 parameter addresses and generates stereo PCM through
+`Hw_Generate`, with chip IRQs routed back to the firmware. Startup output has
+been captured on all three C100 versions. All DLL calls and playback buffers
+belong to one audio thread. Volume mapping and some chip controls are provisional.
+PCM/ADPCM stream interrupts, refill timing and sample-position reads are now
+translated, but compatibility remains incomplete. The phone filesystem manager
+is read-only (directory inspection, TSV export and NVM backup); custom media and
+Java imports and CPU/DSP navigation tones are not implemented yet.
+CLI: `--ma5-hw PATH`, optional `--audio-wav FILE` and `--audio-ticks-hz N`.
+The tick rate is not a measured CPU clock. DLL download requires explicit consent;
 no firmware, DLL, voice bank or generated proprietary asset is distributed.
 
 ## Layout

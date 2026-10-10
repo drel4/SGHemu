@@ -9,4 +9,5 @@ typedef struct {
 } Intc;
 int intc_attach(Intc *device, Bus *bus, uint32_t base);
 void intc_advance(Intc *device, Arm7 *cpu);
+void intc_advance_time(Intc *device,Arm7 *cpu,uint64_t ticks);
 #endif

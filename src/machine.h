@@ -9,11 +9,21 @@
 #include "irom.h"
 #include "keypad.h"
 #include "sim.h"
+#include "ma3.h"
 #define SGH_MAX_IDENTITIES 16
 #define SGH_MAX_KEYS 22
 typedef struct { Bus *bus; uint32_t address; uint16_t value; } Identity16;
 typedef struct { Bus *bus; uint32_t address, value; } Register32;
 typedef struct { uint32_t base; size_t size; char path[1024]; } RomImage;
+typedef struct {
+    Bus *bus;
+    uint32_t base, reference_hz, arm_hz, dsp_hz;
+    uint16_t registers[3], encoding[8];
+    uint32_t arm_rates[8], dsp_rates[8];
+    unsigned count;
+    uint64_t nanoseconds, fraction, clock_cycles;
+    int attached, unknown;
+} PhoneClock;
 typedef struct {
     Bus bus;
     Arm7 cpu;
@@ -43,6 +53,10 @@ typedef struct {
     Irom irom;
     Keypad keypad;
     Sim sim;
+    Ma3 ma3;
+    PhoneClock clock;
+    int periodic_time;
+    uint32_t fs_header, fs_table, fs_capacity, fs_stride;
     uint32_t irq_gate_address, irq_gate_mask;
     Register32 *irq_gate_register;
     int loaded, bringup;

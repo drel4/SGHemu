@@ -108,13 +108,23 @@ void nvram_store_release(NvramStore *s)
 int nvram_store_open(NvramStore *s, Machine *m, const char *directory)
 {
     uint8_t h[HEADER_SIZE], key[32];
-    char hex[65], lock_path[1100];
+    char hex[65], lock_path[1100], model_directory[1024], legacy[1024];
+    int model_local=directory==NULL;
     DWORD attrs, error;
     unsigned i;
     if (s->active || s->lock) return fail(m, "storage session already open");
     if (!m->nvram_data) return 1;
     if (m->cpu.instructions || m->cpu.cycles) return fail(m, "storage open requires fresh reset");
     if (!header(m, h) || !digest(h, IDENTITY_SIZE, key)) return fail(m, "storage identity hashing failed");
+    if(model_local) {
+        char *slash,*backslash;
+        strcpy(model_directory,m->config_path);
+        slash=strrchr(model_directory,'/');backslash=strrchr(model_directory,'\\');
+        if(backslash&&(!slash||backslash>slash))slash=backslash;
+        if(slash)slash[1]=0;else *model_directory=0;
+        if(strlen(model_directory)>890)return fail(m,"model storage path is too long");
+        strcat(model_directory,"state");directory=model_directory;
+    }
     if (!directory || !*directory || strlen(directory) > 900) return fail(m, "invalid storage directory");
     if (!CreateDirectoryA(directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
         return fail(m, "cannot create storage directory");
@@ -131,6 +141,18 @@ int nvram_store_open(NvramStore *s, Machine *m, const char *directory)
         s->saved = 1;
     } else if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
         nvram_store_release(s); return fail(m, "cannot inspect saved storage");
+    }
+    if(model_local&&!s->saved) {
+        snprintf(legacy,sizeof(legacy),"state/%s.snv",hex);
+        attrs=GetFileAttributesA(legacy);error=GetLastError();
+        if(attrs!=INVALID_FILE_ATTRIBUTES) {
+            /* Validation includes ROM hashes/map and payload checksum. Keep
+               the original intact; new writes go only to model-local storage. */
+            if(!nvram_load(m,legacy)||!nvram_save(m,s->path)){nvram_store_release(s);return 0;}
+            s->saved=1;
+        } else if(error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND) {
+            nvram_store_release(s);return fail(m,"cannot inspect legacy storage");
+        }
     }
     if (!digest(m->nvram_data, m->nvram_size, s->saved_hash)) {
         nvram_store_release(s); return fail(m, "storage hashing failed");
@@ -182,9 +204,9 @@ int nvram_store_step(NvramStore *s, Machine *m)
         if (c->r[0] != 0) return fail(m, "guest factory formatting failed");
         s->stage = 2; c->r[0] = 0; c->r[14] = m->nv_trigger | 1u; c->r[15] = m->nv_marker;
     } else {
-        uint64_t instructions = c->instructions, cycles = c->cycles;
+        uint64_t instructions = c->instructions, cycles = c->cycles,clock_cycles=c->clock_cycles;
         if (c->r[0] != 1) return fail(m, "guest initialization-marker write failed");
-        *c = s->caller; c->instructions = instructions; c->cycles = cycles;
+        *c = s->caller; c->instructions = instructions; c->cycles = cycles;c->clock_cycles=clock_cycles;
         s->stage = 3;
         if (!nvram_store_flush(s, m)) return 0;
         return 2; /* Service formatting precedes ordinary phone startup: cold reset required. */

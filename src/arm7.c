@@ -441,16 +441,59 @@ static int thumb(Arm7 *c, uint32_t op)
     }
     return fail(c, "unimplemented/reserved Thumb instruction");
 }
+static unsigned register_count(uint32_t mask)
+{
+    unsigned n=0;while(mask){n+=mask&1;mask>>=1;}return n;
+}
+static unsigned multiply_cycles(uint32_t value,int signed_value)
+{
+    unsigned n;
+    for(n=1;n<4;++n){uint32_t upper=value>>(n*8);
+        if(!upper||(signed_value&&upper==(UINT32_MAX>>(n*8))))return n;}
+    return 4;
+}
+static unsigned instruction_cycles(const Arm7 *c,uint32_t op)
+{
+    /* ARM DDI 0210 instruction speed summary, S=N=I=one core cycle.
+       Memory wait states and bus-width penalties belong to the bus/model. */
+    unsigned n,load,rd;
+    if(!(c->cpsr&ARM_T)) {
+        if(!cond(c,op>>28))return 1;
+        if((op&0x0fbf0fffu)==0x010f0000u||(op&0x0fb0fff0u)==0x0120f000u||(op&0x0fb0f000u)==0x0320f000u)return 1;
+        if((op&0x0ffffff0u)==0x012fff10u||(op&0x0e000000u)==0x0a000000u||(op&0x0f000000u)==0x0f000000u)return 3;
+        if((op&0x0f8000f0u)==0x00800090u)return 2+multiply_cycles(c->r[(op>>8)&15],!!(op&(1u<<22)))+!!(op&(1u<<21));
+        if((op&0x0fc000f0u)==0x00000090u)return 1+multiply_cycles(c->r[(op>>8)&15],1)+!!(op&(1u<<21));
+        if((op&0x0fb00ff0u)==0x01000090u)return 4;
+        load=(op>>20)&1;rd=(op>>12)&15;
+        if((op&0x0e000000u)==0x08000000u){n=register_count(op&65535);if(!n)n=16;return n+1+load+(load&&!!(op&0x8000)?2:0);}
+        if((op&0x0c000000u)==0x04000000u||((op&0x0e000090u)==0x00000090u&&(op&0x60u)))return load?3+(rd==15?2:0):2;
+        if((op&0x0c000000u)==0){n=(!(op&(1u<<25))&&!!(op&16))?2:1;
+            return n+((rd==15&&((op>>21)&15)!=8&&((op>>21)&15)!=9&&((op>>21)&15)!=10&&((op>>21)&15)!=11)?2:0);}
+        return 1;
+    }
+    if((op&0xfc00)==0x4000){n=(op>>6)&15;if(n==13)return 1+multiply_cycles(c->r[(op>>3)&7],1);return ((n>=2&&n<=4)||n==7)?2:1;}
+    if((op&0xfc00)==0x4400){n=(op>>8)&3;rd=(op&7)|((op>>4)&8);return n==3||((n==0||n==2)&&rd==15)?3:1;}
+    if((op&0xf800)==0x4800)return 3;
+    if((op&0xf000)==0x5000){n=(op>>9)&7;return n>=3?3:2;}
+    if((op&0xe000)==0x6000||(op&0xf000)==0x8000||(op&0xf000)==0x9000)return op&0x0800?3:2;
+    if((op&0xf600)==0xb400){load=!!(op&0x0800);n=register_count(op&255)+!!(op&256);return n+1+load+(load&&!!(op&256)?2:0);}
+    if((op&0xf000)==0xc000){n=register_count(op&255);if(!n)n=16;load=!!(op&0x0800);return n+1+load+(load&&!(op&255)?2:0);}
+    if((op&0xf000)==0xd000){n=(op>>8)&15;return n==15||cond(c,n)?3:1;}
+    if((op&0xf800)==0xe000||(op&0xf800)==0xf800)return 3;
+    return 1;
+}
 int arm7_step(Arm7 *c)
 {
     int ok;
+    unsigned clocks;
     if (c->halted) return 0;
     c->last_pc = c->r[15]; c->bus->pc = c->last_pc; c->bus->ticks = c->cycles;
-    if (c->fiq && !(c->cpsr & 0x40u)) { exception(c, 0x11, 0x1c, c->last_pc + 4, 1); ++c->cycles; return 1; }
-    if (c->irq && !(c->cpsr & 0x80u)) { exception(c, 0x12, 0x18, c->last_pc + 4, 0); ++c->cycles; return 1; }
+    if (c->fiq && !(c->cpsr & 0x40u)) { exception(c, 0x11, 0x1c, c->last_pc + 4, 1); ++c->cycles;c->clock_cycles+=3; return 1; }
+    if (c->irq && !(c->cpsr & 0x80u)) { exception(c, 0x12, 0x18, c->last_pc + 4, 0); ++c->cycles;c->clock_cycles+=3; return 1; }
     c->last_opcode = bus_read(c->bus, c->last_pc, (c->cpsr & ARM_T) ? 2 : 4);
     if (c->bus->fault) return fail(c, "instruction fetch/bus fault pending");
+    clocks=instruction_cycles(c,c->last_opcode);
     c->r[15] += (c->cpsr & ARM_T) ? 2u : 4u;
     ok = (c->cpsr & ARM_T) ? thumb(c, c->last_opcode) : arm(c, c->last_opcode);
-    ++c->instructions; ++c->cycles; return ok;
+    ++c->instructions; ++c->cycles;c->clock_cycles+=clocks; return ok;
 }
