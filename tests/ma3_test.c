@@ -50,6 +50,16 @@ int main(void)
     /* Firmware 1B,00 is a 3456-unit divider, not native register 1B00/4. */
     ss(2);data(0x5e);data(0x82);data(0x1b);data(0x80);
     CHECK(registers[0x23]==0x39);CHECK(registers[0x24]==0x94);
+    /* Explicit sequence reset rebases time, unlike ordinary pause/resume. */
+    ss(2);data(0x61);data(0x82);data(0x81);CHECK(registers[0x26]==1);
+    ss(4);data(8);CHECK(registers[0x26]==3);
+    registers[0x26]=99;data(8);CHECK(registers[0x26]==99);
+    data(0);CHECK(registers[0x26]==99);data(8);CHECK(registers[0x26]==3);
+    data(0);ss(2);data(0x61);data(0x82);data(0x80);CHECK(registers[0x26]==0);
+    ss(4);data(0x28);CHECK(registers[0x26]==2);data(0);
+    ss(2);data(0x61);data(0x82);data(0x81);CHECK(registers[0x26]==1);
+    ss(4);data(0x20);CHECK(registers[0x26]==1);data(0);
+    ss(2);data(0x61);data(0x82);data(0x80);
     /* A split FIFO packet must preserve its delta and note gate/channel byte. */
     count=0;ss(1);data(0x85);data(0x80);data(8);data(0);data(0x34);
     CHECK(count==1);ss(0x81);data(0x2c);data(0x4a);data(0xc0);

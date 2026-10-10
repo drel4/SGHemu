@@ -72,6 +72,33 @@ static int refill_timer(Ma3 *m)
     parameter(0x155,0);
     return i>=20&&i<=23&&(irq&0x20);
 }
+static void timed_payload(unsigned delay,unsigned value)
+{
+    ss(1);
+    do {unsigned byte=delay&127;delay>>=7;data(byte|(delay?0:128));}while(delay);
+    data(0x5a);data(0x82);data(value|128);
+}
+static int interrupted_sequence(Ma3 *m)
+{
+    unsigned i,irq=0,payload;
+    ma5_hw_reset(m->hw);ss(4);data(0);
+    parameter(0x162,0x7f);parameter(0x15e,6);parameter(0x15f,97);
+    timed_payload(100,1);timed_payload(1000,2);parameter(0x161,3);
+    for(i=0;i<50;++i)if(!ma5_hw_generate(m->hw,480))return 0;
+    parameter(0x161,0);ss(0);data(0xff);
+    ss(4);data(0x20);data(0);
+    timed_payload(100,3);
+    /* C100 refill recovery: clear, refill, sequence-reset pulse, start. */
+    ss(4);data(8);data(0);parameter(0x161,1);
+    for(i=1;i<=200;++i) {
+        if(!ma5_hw_generate(m->hw,48))return 0;
+        ss(0);irq=bus_read(&bus,0x200004,1);if(irq&1)break;
+    }
+    ss(3);data(0x5a);data(0x82);data(0x80);ss(0x11);
+    payload=bus_read(&bus,0x200004,1);
+    printf("MA-3 interrupted sequence: next 100-tick event at %u ms payload=%02x\n",i,payload);
+    return i>=100&&i<=103&&payload==3;
+}
 int main(int argc,char **argv)
 {
     Ma3 m={0};Intc intc={0};unsigned i;int ok=1;
@@ -84,5 +111,6 @@ int main(int argc,char **argv)
     for(i=0;i<3;++i)if(!sample(&m,i))ok=0;
     for(i=0;i<2;++i)if(!stream_event(&m,i))ok=0;
     if(!refill_timer(&m))ok=0;
+    if(!interrupted_sequence(&m))ok=0;
     ma3_destroy(&m);bus_destroy(&bus);return ok?0:1;
 }

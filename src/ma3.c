@@ -181,7 +181,7 @@ static uint32_t read_ma3(void *ctx,uint32_t off,unsigned width)
 }
 static void write_ma3(void *ctx,uint32_t off,unsigned width,uint32_t value)
 {
-    Ma3 *m=ctx;
+    Ma3 *m=ctx;unsigned reset_sequence=0;
     if(width!=1||(off!=0&&off!=4)){bus_fault_access(m->bus,1,m->base+off,width,value,"MA-3 requires byte port access");return;}
     ++m->writes;if(off==0) {
         m->selector=value&255;
@@ -189,7 +189,10 @@ static void write_ma3(void *ctx,uint32_t off,unsigned width,uint32_t value)
     }
     else if((m->selector&63)==1||(m->selector&63)==2)++m->fifo_bytes;
     if(off==4) {
-        if((m->selector&63)==4){if(value&128)reset_parameters(m);m->bank=value&3;}
+        if((m->selector&63)==4){
+            reset_sequence=(value&~m->control)&8;
+            if(value&128)reset_parameters(m);m->bank=value&3;m->control=value&255;
+        }
         if((m->selector&63)==1)delayed_packet(m,value);
         parameter_packet(m,value);
         if(m->hw&&(m->selector&63)==7&&m->bank==0) {
@@ -210,6 +213,13 @@ static void write_ma3(void *ctx,uint32_t off,unsigned width,uint32_t value)
         }
         else if((m->selector&63)>3||(m->selector&63)==0) {
             ma5_hw_write(m->hw,0,m->selector);ma5_hw_write(m->hw,1,value);
+            /* C100 ClearFifo uses 0x28; refill recovery uses clear 0x20,
+               then reset 0x08 before restarting. Native MA-5 bit 3 only
+               resets its parser, leaving the cumulative tick/deadline pair
+               from the interrupted tune. Rebase both through native reset,
+               preserving the guest run bit and independent refill timer.
+               Plain stop/start (pause/resume) must not reset sequence time. */
+            if(reset_sequence)ma5_hw_register(m->hw,0x26,(m->parameter_ram[0x161]&1)|2,m->bank);
         }
     }
 }

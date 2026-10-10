@@ -109,7 +109,7 @@ reload/run. Flash changes affect host-owned emulated memory only, not ROM files.
 
 `build.cmd` runs 255 CPU/bus, 118 machine, 100 peripheral, 24 firmware-folder,
 158 NVM snapshot/persistence, 43 keypad, 73 internal-ROM HLE, 135 SIM,
-215 MA-3 and 20 filesystem checks (**1,141 total**) using synthetic
+256 MA-3 and 20 filesystem checks (**1,182 total**) using synthetic
 fixtures (no proprietary inputs required). Optional real-ROM
 regressions, compiled by the same build:
 

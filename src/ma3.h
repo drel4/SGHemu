@@ -6,7 +6,7 @@ typedef struct {
     Bus *bus; Intc *intc; Ma5Hw *hw;
     uint32_t base, irq_mask, ticks_hz, sequence_quantum_ns;
     uint64_t last_tick, fractional, pending_frames, reads, writes, fifo_bytes, irq_events;
-    unsigned selector; int attached;
+    unsigned selector, control; int attached;
     uint8_t parameter_ram[0x400];
     uint32_t packet_address, packet_length;
     unsigned packet_phase, address_bytes, length_bytes, response, response_mask;

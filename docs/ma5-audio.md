@@ -234,8 +234,8 @@ SIM/DMA calibration and complete DSP timer modeling remain outstanding. See
 
 ### Recorded checks
 
-- Synthetic protocol suite: 215 checks, no DLL/firmware needed; total build suite
-  now 1,141 checks. Covers readback/reset, divider and pitch translation, split FIFO packets,
+- Synthetic protocol suite: 256 checks, no DLL/firmware needed; total build suite
+  now 1,182 checks. Covers readback/reset, divider and pitch translation, split FIFO packets,
   preservation of unsupported-command delays, emulated-time PCM and IRQ routing,
   wrong-width accesses and bounded packets.
 - Live RBO1 reads now query native parameter/sample RAM without advancing PCM time.
@@ -324,9 +324,32 @@ and the reported fast initial/game playback still require verification.
 
 `ma5seqprobe` tests a 100-tick event across native FIFO clears and restarts:
 102 ms initially, 101 ms after FIFO clear/start, and 102 ms with counter reset.
-A clear correctly reanchors relative delays even without resetting the native
-free-running counter. This rules out an unconditional start/reset patch as the
-solution to the reported fast ringtone/game playback; that report remains open.
+This empty-FIFO experiment does not cover an interrupted tune: the native clock
+stops advancing while the FIFO is empty. Plain stop/start must preserve timing.
+
+### Sequencer reset translation (post-v0.2.0 test build)
+
+Ghidra confirms `MaDevDrv_ClearFifo` (`0x011C77BA`) pulses port 4 with `0x28`.
+`MaDevDrv_Fifo` (`0x011C754E`) recovers an underrun with stop, clear `0x20`,
+refill, pulse `0x08`, then start. Native MA-5 bit 3 resets only the parser;
+it leaves the accumulated Q16 tick count and cumulative packet deadline intact.
+Native `0x26` bit 1 resets both (`0x10005E08` and its register dispatcher).
+
+An interrupted-sequence probe queues events at 100 and 1,100 ticks, advances
+500 ms, stops/clears, then queues a new 100-tick event. Pass-through reset plays
+that event after **1 ms** instead of 100 ms; native counter reset gives **102 ms**.
+The adapter now translates the rising MA-3 `0x08` pulse into a native counter
+reset, retaining the guest run bit. It does not reset on ordinary pause/resume,
+change sample rate/pitch, or change the independent stream-refill timer.
+`ma3pcmprobe` verifies the guest-facing recovery sequence produces its 100-tick
+payload after 102 ms. Real ringtone/game tempo still needs playback verification;
+this correction is not included in the published v0.2.0 snapshot.
+
+The isolated firmware-driven Arabesque regression completes without CPU/audio
+errors. Its opening 992-byte sample load now happens on the first sequence
+start (instruction tick 267,513,535 rather than 323,072,364 in the pre-fix run),
+followed by 98 live position reads and repeated sample refills. This demonstrates
+that the opening is no longer skipped; it is not a physical-handset tempo test.
 
 ```powershell
 .\build\ma3pcmprobe.exe MA5libs/M5_EmuHw.dll
