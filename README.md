@@ -52,9 +52,10 @@ For an optimized x86 build with the C runtime linked statically, run
 Release ZIPs contain the GUI, CLI, firmware-inspection and standalone audio
 tools, model configs, and documentation. Extract the whole archive and launch
 `build/sghemu-gui.exe`; keep the supplied directory layout. Firmware and Yamaha
-DLLs must be supplied separately. The v0.2.0 build adds opt-in experimental
-hardware audio; v0.1.0 was silent. Playback can still run too fast, especially
-after ringtone changes and in games; this release does not fix that issue.
+DLLs must be supplied separately. Hardware audio is opt-in; v0.1.0 was silent.
+v0.2.1 improves sequencer restart timing and v0.2.2 adds an experimental ADPCM
+stream-cache correction. Instrument compatibility and occasional stutter remain
+under investigation; real-handset tempo and complete stream playback are unverified.
 
 In the GUI use **File > Open firmware folder (Ctrl+O)**. Pick the folder containing
 both firmware files, or a parent folder containing several sets. Exact SHA-256
@@ -109,7 +110,7 @@ reload/run. Flash changes affect host-owned emulated memory only, not ROM files.
 
 `build.cmd` runs 255 CPU/bus, 118 machine, 100 peripheral, 24 firmware-folder,
 158 NVM snapshot/persistence, 43 keypad, 73 internal-ROM HLE, 135 SIM,
-256 MA-3 and 20 filesystem checks (**1,182 total**) using synthetic
+267 MA-3 and 20 filesystem checks (**1,193 total**) using synthetic
 fixtures (no proprietary inputs required). Optional real-ROM
 regressions, compiled by the same build:
 

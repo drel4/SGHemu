@@ -8,7 +8,7 @@ typedef struct {
     uint64_t last_tick, fractional, pending_frames, reads, writes, fifo_bytes, irq_events;
     unsigned selector, control; int attached;
     uint8_t parameter_ram[0x400];
-    uint32_t packet_address, packet_length;
+    uint32_t packet_address, packet_length, packet_start, packet_total;
     unsigned packet_phase, address_bytes, length_bytes, response, response_mask;
     uint64_t ram_reads;
     unsigned response_selector, bank, delayed_length, delayed_phase, delay_end, address_end, address_count;

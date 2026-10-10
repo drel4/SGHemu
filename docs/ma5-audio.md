@@ -234,8 +234,8 @@ SIM/DMA calibration and complete DSP timer modeling remain outstanding. See
 
 ### Recorded checks
 
-- Synthetic protocol suite: 256 checks, no DLL/firmware needed; total build suite
-  now 1,182 checks. Covers readback/reset, divider and pitch translation, split FIFO packets,
+- Synthetic protocol suite: 267 checks, no DLL/firmware needed; total build suite
+  now 1,193 checks. Covers readback/reset, divider and pitch translation, split FIFO packets,
   preservation of unsupported-command delays, emulated-time PCM and IRQ routing,
   wrong-width accesses and bounded packets.
 - Live RBO1 reads now query native parameter/sample RAM without advancing PCM time.
@@ -309,7 +309,8 @@ field `+0x124`, 32 channel records of stride `0x80CC`, format `+0x8029` and Q16
 sample cursor `+0x808C`. Ghidra `0x10001AD0`, `0x1001C4E8`, `0x1001C13C` and
 `0x1001B324/5CC/820` establish this layout. Address ranges/protection are checked
 with VirtualQuery, invalid voices/layout return failure, and no private function
-is called or native memory written. This hook is **not portable across DLL
+is called. The stream-cache correction below adds one narrowly scoped native
+state write. These hooks are **not portable across DLL
 builds**; the existing exact hash/version refusal is essential. Tests verify
 format/cursor values for all three generated codecs and reject voice 32.
 
@@ -360,3 +361,32 @@ CPU/DSP navigation tones are a separate path: `kid_keybeep` (`0x011443FC`)
 calls `audioStartTone` (`0x011D3DBA`) for ordinary tones; `TGSetToneD1`
 (`0x012AF30C`) programs tone state. That path is not implemented yet and is
 not replaced with host keypress beeps.
+
+### ADPCM stream-cache correction (v0.2.2 experimental build)
+
+The user confirms improved playback speed, but reports repeating stream openings.
+Ghidra `0x1001BCE4` confirms a decoded ADPCM sample cache: the decoder only reads
+compressed RAM for indices at/above its next-decoded index, otherwise returning
+cached PCM. Loop wrap does not rewind that index. RAM refills therefore cannot
+replace already cached audio, despite observed guest refill activity.
+
+Completed immediate RAM packets now notify the audio worker of their full range.
+Writes overlapping a live ADPCM voice's already decoded input mark that cache
+dirty. Generation splits at the voice's loop boundary, then resets only its
+next-decoded index (channel `+0x14`) to zero. The predictor, step size, envelope,
+sample cursor and key-on state are preserved. Normal unmodified sample loops and
+PCM8/PCM16 are untouched. This is a **write hook into the exact hash-pinned DLL**,
+not a portable exported API. Readability/writability are checked before access;
+an unavailable layout fails audio generation instead of guessing.
+
+The generated-ADPCM probe modifies compressed RAM during playback and verifies
+exactly one cache refresh; pitch, stream IRQ, refill timer and sequence-reset
+probes still pass. Delayed FIFO packets are sent in one synchronous worker command
+instead of a thread handoff per byte, retaining packet order and buffer lifetime.
+This reduces scheduling overhead; eliminating host underruns and completing
+instrument/control compatibility are not claimed.
+
+The isolated firmware-driven Arabesque run completes without CPU/audio errors
+and exercises eight ADPCM cache refreshes. The opening sample is still loaded
+on the first start, and the guest continues its ring-buffer refills. The user
+has not yet confirmed this build's audible stream/instrument behavior.

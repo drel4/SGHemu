@@ -27,6 +27,8 @@ struct Ma5Hw {
     int speakers, initialized, op, paused, timer_period; unsigned arg, result;
     volatile LONG irq, callbacks;
     Ma5HwStats stats;
+    unsigned adpcm_dirty[32];
+    const uint8_t *packet;unsigned packet_size;
 };
 static volatile LONG occupied;
 static int native_u32(uintptr_t address,uint32_t *value)
@@ -42,6 +44,64 @@ static int native_u32(uintptr_t address,uint32_t *value)
     memcpy(value,(const void *)address,sizeof(*value));return 1;
 }
 static Ma5Hw *callback_owner; /* DLL singleton, touched only by its worker. */
+static uintptr_t pcm_channel(Ma5Hw *h,unsigned voice)
+{
+    uint32_t engine;
+    if(voice>=32||!native_u32((uintptr_t)h->dll+0x101780+0x124,&engine)||!engine)return 0;
+    return (uintptr_t)engine+voice*0x80cc;
+}
+static int native_store(uintptr_t address,uint32_t value)
+{
+    MEMORY_BASIC_INFORMATION region;uint32_t original;
+    if(!native_u32(address,&original)||!VirtualQuery((void *)address,&region,sizeof(region))||
+       !(region.Protect&(PAGE_READWRITE|PAGE_WRITECOPY|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY)))return 0;
+    memcpy((void *)address,&value,sizeof(value));return 1;
+}
+static void ram_changed(Ma5Hw *h,unsigned address,unsigned length)
+{
+    unsigned voice;uintptr_t start=(uintptr_t)h->dll+0x101780+0x160+address;
+    if(address<0x4000||address>=0x6000||!length||length>0x6000-address)return;
+    for(voice=0;voice<32;++voice) {
+        uintptr_t channel=pcm_channel(h,voice);uint32_t format,source,count,active;
+        if(!channel||!native_u32(channel+4,&active)||!(active&255)||
+           !native_u32(channel+0x8028,&format)||((format>>8)&3)||
+           !native_u32(channel+0x10,&source)||!native_u32(channel+0x14,&count))continue;
+        /* Only writes overlapping already decoded input make the cache stale.
+           Decoder 1001BCE4: next index +10, step +14, predictor +18 (channel+4).
+           Leave predictor/step intact: a stream is continuous across refills. */
+        if(start<(uintptr_t)source+(count+1)/2&&start+length>source)h->adpcm_dirty[voice]=1;
+    }
+}
+static int synthesize(Ma5Hw *h,int16_t *left,int16_t *right,unsigned frames)
+{
+    while(frames) {
+        unsigned voice,count=frames;uint32_t before[32]={0};
+        for(voice=0;voice<32;++voice)if(h->adpcm_dirty[voice]) {
+            uintptr_t channel=pcm_channel(h,voice);uint32_t phase,step,end,loop,format,active;
+            uint64_t remaining,n;
+            if(!channel||!native_u32(channel+0x8028,&format)||!native_u32(channel+4,&active))return 0;
+            if(((format>>8)&3)||!(active&255)){h->adpcm_dirty[voice]=0;continue;}
+            if(!channel||!native_u32(channel+0x808c,&phase)||!native_u32(channel+0x80b8,&step)||
+               !native_u32(channel+0x8040,&end)||!native_u32(channel+0x803c,&loop))return 0;
+            if(loop>=end||!step){h->adpcm_dirty[voice]=0;continue;}
+            before[voice]=phase;
+            remaining=(uint64_t)end*65536;
+            if(remaining>phase){n=(remaining-phase+step-1)/step;if(n<count)count=(unsigned)n;}
+        }
+        h->generate(left,right,count);
+        for(voice=0;voice<32;++voice)if(h->adpcm_dirty[voice]) {
+            uintptr_t channel=pcm_channel(h,voice);uint32_t phase;
+            if(!channel||!native_u32(channel+0x808c,&phase))return 0;
+            if(phase<before[voice]) {
+                if(!native_store(channel+0x14,0))return 0;
+                ++h->stats.adpcm_refreshes;
+                h->adpcm_dirty[voice]=0;
+            }
+        }
+        frames-=count;left+=count;right+=count;
+    }
+    return 1;
+}
 static void __cdecl irq_callback(void)
 {
     if(callback_owner) { InterlockedExchange(&callback_owner->irq,1); InterlockedIncrement(&callback_owner->callbacks); }
@@ -79,7 +139,7 @@ static int generate(Ma5Hw *h,unsigned frames)
     int16_t left[482]={0},right[482]={0};unsigned i,slot=h->next;WAVEHDR *header=&h->headers[slot];
     if(!frames||frames>480||(h->wav&&h->stats.frames>(UINT32_MAX-36u)/4u-frames))return 0;
     left[0]=left[frames+1]=12345;right[0]=right[frames+1]=12345;
-    h->generate(left+1,right+1,frames);
+    if(!synthesize(h,left+1,right+1,frames))return 0;
     if(left[0]!=12345||left[frames+1]!=12345||right[0]!=12345||right[frames+1]!=12345)return 0;
     if(h->wave && (header->dwFlags&WHDR_PREPARED)) {
         unsigned finished=0;
@@ -140,7 +200,7 @@ static unsigned __stdcall worker(void *arg)
         case 3:h->write_data((unsigned char)h->arg);break;
         case 4:if(!generate(h,h->arg)){h->stats.failed=1;h->result=0;}break;
         case 5:goto cleanup;
-        case 6:h->term();h->initialized=0;h->irq=0;
+        case 6:h->term();h->initialized=0;h->irq=0;memset(h->adpcm_dirty,0,sizeof(h->adpcm_dirty));
             if(h->init(48000,0,irq_callback)!=0x46){h->stats.failed=1;h->result=0;}else h->initialized=1;break;
         case 7:if(h->wave){if(h->arg)waveOutPause(h->wave);else waveOutRestart(h->wave);}h->paused=(int)h->arg;break;
         case 8:
@@ -178,6 +238,9 @@ static unsigned __stdcall worker(void *arg)
             if(!native_u32(channel+0x808c,&phase)||!native_u32(channel+0x8028,&sample_format))break;
             h->result=(((sample_format>>8)&3)<<24)|(phase>>16);break;
         }
+        case 15:ram_changed(h,h->arg&0xffff,h->arg>>16);break;
+        case 16:h->write_status((unsigned char)h->arg);
+            for(i=0;i<h->packet_size;++i)h->write_data(h->packet[i]);break;
         case 13: {
             unsigned address=h->arg&0xfffff,bytes=(h->arg&0x100000)?3:address>=128?2:1;
             h->write_status(3);
@@ -230,12 +293,20 @@ failed:
 }
 unsigned ma5_hw_read(Ma5Hw *h,int data){return command(h,data?1:0,0);}
 void ma5_hw_write(Ma5Hw *h,int data,unsigned value){(void)command(h,data?3:2,value);}
+void ma5_hw_fifo(Ma5Hw *h,unsigned selector,const uint8_t *bytes,unsigned length)
+{
+    if(!h||!bytes||!length)return;
+    /* Synchronous single-sender command: bytes stays alive through completion. */
+    h->packet=bytes;h->packet_size=length;(void)command(h,16,selector);
+    h->packet=NULL;h->packet_size=0;
+}
 int ma5_hw_generate(Ma5Hw *h,unsigned frames){return (int)command(h,4,frames);}
 void ma5_hw_pause(Ma5Hw *h,int paused){(void)command(h,7,(unsigned)(paused!=0));}
 void ma5_hw_reset(Ma5Hw *h){(void)command(h,6,0);}
 void ma5_hw_parameter(Ma5Hw *h,unsigned address,unsigned value){(void)command(h,9,(address<<8)|(value&255));}
 unsigned ma5_hw_memory(Ma5Hw *h,unsigned address,int full_ram){return command(h,13,address|(full_ram?0x100000:0));}
 unsigned ma5_hw_pcm_cursor(Ma5Hw *h,unsigned voice){return command(h,14,voice);}
+void ma5_hw_ram_changed(Ma5Hw *h,unsigned address,unsigned length){(void)command(h,15,(length<<16)|(address&0xffff));}
 void ma5_hw_register(Ma5Hw *h,unsigned reg,unsigned value,unsigned bank){(void)command(h,10,(bank<<16)|(reg<<8)|(value&255));}
 int ma5_hw_irq(Ma5Hw *h){return h?(int)InterlockedExchange(&h->irq,0):0;}
 int ma5_hw_stress(Ma5Hw *h){return (int)command(h,8,0);}

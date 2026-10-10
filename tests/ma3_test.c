@@ -9,14 +9,18 @@ static unsigned parameter_address, parameter_value, registers[64];
 static unsigned memory_address,memory_full,memory_value;
 static unsigned native_selector,native_low,native_high;
 static unsigned sample_cursor,sample_voice;
+static unsigned changed_address,changed_length;
 #define CHECK(x) do { ++checks; if(!(x)){fprintf(stderr,"MA-3 line %d: %s\n",__LINE__,#x);exit(1);} } while(0)
 Ma5Hw *ma5_hw_open(const char *d,const char *w,int s,char *e,unsigned n)
 { (void)d;(void)w;(void)s;(void)e;(void)n;return &mock; }
 void ma5_hw_close(Ma5Hw *h){(void)h;}
+void ma5_hw_ram_changed(Ma5Hw *h,unsigned address,unsigned length){(void)h;changed_address=address;changed_length=length;}
 unsigned ma5_hw_read(Ma5Hw *h,int data){(void)h;return data?
     native_selector==0?native_low:native_selector==0x10?native_high:0:0;}
 void ma5_hw_write(Ma5Hw *h,int data,unsigned value)
 {(void)h;if(!data)native_selector=value&63;CHECK(count<4096);ports[count]=(unsigned)data;values[count++]=value;}
+void ma5_hw_fifo(Ma5Hw *h,unsigned selector,const uint8_t *bytes,unsigned length)
+{unsigned i;ma5_hw_write(h,0,selector);for(i=0;i<length;++i)ma5_hw_write(h,1,bytes[i]);}
 void ma5_hw_parameter(Ma5Hw *h,unsigned a,unsigned v){(void)h;parameter_address=a;parameter_value=v;}
 unsigned ma5_hw_memory(Ma5Hw *h,unsigned a,int full){(void)h;memory_address=a;memory_full=(unsigned)full;return memory_value;}
 unsigned ma5_hw_pcm_cursor(Ma5Hw *h,unsigned voice){(void)h;sample_voice=voice;return sample_cursor;}
@@ -84,6 +88,9 @@ int main(void)
     /* Literal full-RAM data at an address resembling a pitch register. */
     count=0;ss(1);data(0x80);data(3);data(0);data(0x80);data(0x81);data(0xac);
     CHECK(values[count-1]==0xac);
+    ss(2);data(0x20);data(0);data(0x81);data(0x83);data(1);data(2);
+    CHECK(changed_address==0&&changed_length==0); /* No notification before packet completes. */
+    data(3);CHECK(changed_address==0x4020&&changed_length==3);
     /* Stream-start payloads retain their delta, channel and live readback. */
     count=0;ss(1);data(0x89);data(0x5a);data(0x82);data(0xc3);
     CHECK(values[2]==0x89);CHECK(values[3]==0x56&&values[4]==0x83);

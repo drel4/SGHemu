@@ -1,5 +1,6 @@
 #include "ma3.h"
 #include <stdio.h>
+#include <string.h>
 /* Exercise the guest-facing ports, including literal bytes with bit 7 set. */
 static Bus bus;
 static void ss(unsigned value){bus_write(&bus,0x200000,1,value);}
@@ -30,6 +31,12 @@ static int sample(Ma3 *m,unsigned format)
     parameter(0x63,2);parameter(0x64,0);parameter(0x65,0x40);
     before=ma5_hw_stats(m->hw);
     for(i=0;i<20;++i)if(!ma5_hw_generate(m->hw,480))return 0;
+    if(!format) {
+        /* Refill a previously decoded, looping ADPCM buffer while key stays on. */
+        memset(bytes,0x88,sizeof(bytes));ram(0x4020,bytes,sizeof(bytes));
+        for(i=0;i<20;++i)if(!ma5_hw_generate(m->hw,480))return 0;
+        if(ma5_hw_stats(m->hw).adpcm_refreshes!=before.adpcm_refreshes+1)return 0;
+    }
     after=ma5_hw_stats(m->hw);
     { unsigned cursor=ma5_hw_pcm_cursor(m->hw,0);
       printf("Native cursor: format=%u samples=%u\n",cursor>>24,cursor&0xffff);

@@ -94,18 +94,19 @@ static void delayed_packet(Ma3 *m,unsigned value)
     mapped=m->address_count==3?m->delayed_address:translate_address(m->delayed_address);
     if(mapped==UINT32_MAX){++m->unsupported;mapped=0x1df;}
     if(m->hw) {
-        ma5_hw_write(m->hw,0,1);
-        for(i=0;i<m->delay_end;++i)ma5_hw_write(m->hw,1,m->delayed[i]);
-        if(m->address_count==3){for(i=m->delay_end;i<m->address_end;++i)ma5_hw_write(m->hw,1,m->delayed[i]);}
+        uint8_t packet[sizeof(m->delayed)+3];unsigned length=0;
+        for(i=0;i<m->delay_end;++i)packet[length++]=m->delayed[i];
+        if(m->address_count==3){for(i=m->delay_end;i<m->address_end;++i)packet[length++]=m->delayed[i];}
         else {
-            if(mapped>=128){ma5_hw_write(m->hw,1,mapped&127);ma5_hw_write(m->hw,1,(mapped>>7)|128);}
-            else ma5_hw_write(m->hw,1,mapped|128);
+            if(mapped>=128){packet[length++]=(uint8_t)(mapped&127);packet[length++]=(uint8_t)((mapped>>7)|128);}
+            else packet[length++]=(uint8_t)(mapped|128);
         }
         /* Preserve the delay of an unsupported command with a hardware NOP. */
-        if(mapped==0x1df)ma5_hw_write(m->hw,1,128);
+        if(mapped==0x1df)packet[length++]=128;
         else for(i=m->address_end;i<m->delayed_length;++i)
-            ma5_hw_write(m->hw,1,m->address_count==3?m->delayed[i]:
+            packet[length++]=(uint8_t)(m->address_count==3?m->delayed[i]:
                 translate_value(m->delayed_address+i-m->address_end,m->delayed[i]));
+        ma5_hw_fifo(m->hw,1,packet,length);
         ++m->translated;
     }
     m->delayed_phase=m->delayed_length=m->delayed_address=m->delayed_count=m->delayed_count_bytes=0;
@@ -121,6 +122,7 @@ static void parameter_packet(Ma3 *m,unsigned value)
         if(value&128) {
             m->packet_phase=mode==3?2:m->address_bytes==3?1:2;
             if(mode==2&&m->address_bytes==3&&m->hw) {
+                m->packet_start=m->packet_address;
                 ma5_hw_write(m->hw,0,2);ma5_hw_write(m->hw,1,m->packet_address&127);
                 ma5_hw_write(m->hw,1,(m->packet_address>>7)&127);ma5_hw_write(m->hw,1,(m->packet_address>>14)|128);
             }
@@ -129,7 +131,7 @@ static void parameter_packet(Ma3 *m,unsigned value)
         if(m->length_bytes>=2){strcpy(m->error,"Invalid MA-3 immediate length");m->packet_phase=3;return;}
         m->packet_length|=(value&127)<<(7*m->length_bytes++);
         if(m->hw)ma5_hw_write(m->hw,1,value);
-        if(value&128)m->packet_phase=m->packet_length?2:3;
+        if(value&128){m->packet_total=m->packet_length;m->packet_phase=m->packet_length?2:3;}
     } else if(m->packet_phase==2) {
         if(mode==3) {
             /* MA-3 RBO is selected by the request's low seven bits. The
@@ -157,7 +159,13 @@ static void parameter_packet(Ma3 *m,unsigned value)
             if(m->address_bytes==3){if(m->hw)ma5_hw_write(m->hw,1,value);}
             else immediate_parameter(m,m->packet_address,value);
             ++m->packet_address;
-            if(m->address_bytes==3){if(m->packet_length)--m->packet_length;if(!m->packet_length)m->packet_phase=3;}
+            if(m->address_bytes==3){
+                if(m->packet_length)--m->packet_length;
+                if(!m->packet_length){
+                    m->packet_phase=3;
+                    if(m->hw)ma5_hw_ram_changed(m->hw,m->packet_start,m->packet_total);
+                }
+            }
             else if(value&128)m->packet_phase=3;
         }
     }
