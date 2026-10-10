@@ -390,3 +390,11 @@ The isolated firmware-driven Arabesque run completes without CPU/audio errors
 and exercises eight ADPCM cache refreshes. The opening sample is still loaded
 on the first start, and the guest continues its ring-buffer refills. The user
 has not yet confirmed this build's audible stream/instrument behavior.
+
+Post-v0.2.2 click correction: the native ADPCM interpolator blends the final
+sample against cached loop-start PCM before wrapping. For a dirty/refilled cache
+that lookahead belongs to the previous lap. Generation now splits before this
+last sample and holds the decoded tail for its fractional lookahead; after wrap,
+the existing cache refresh decodes new input with the same predictor/step state.
+No global smoothing, pitch change or voice restart is applied. Audible results
+still need confirmation; host underrun clicks are a separate remaining issue.

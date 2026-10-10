@@ -78,7 +78,7 @@ static int synthesize(Ma5Hw *h,int16_t *left,int16_t *right,unsigned frames)
         unsigned voice,count=frames;uint32_t before[32]={0};
         for(voice=0;voice<32;++voice)if(h->adpcm_dirty[voice]) {
             uintptr_t channel=pcm_channel(h,voice);uint32_t phase,step,end,loop,format,active;
-            uint64_t remaining,n;
+            uint64_t remaining,n,last;
             if(!channel||!native_u32(channel+0x8028,&format)||!native_u32(channel+4,&active))return 0;
             if(((format>>8)&3)||!(active&255)){h->adpcm_dirty[voice]=0;continue;}
             if(!channel||!native_u32(channel+0x808c,&phase)||!native_u32(channel+0x80b8,&step)||
@@ -86,6 +86,24 @@ static int synthesize(Ma5Hw *h,int16_t *left,int16_t *right,unsigned frames)
             if(loop>=end||!step){h->adpcm_dirty[voice]=0;continue;}
             before[voice]=phase;
             remaining=(uint64_t)end*65536;
+            last=(uint64_t)(end-1)*65536;
+            if(phase<last)remaining=last;
+            else {
+                uint32_t decoded,tail,pair;unsigned shift=(loop&1)*16;
+                /* MA-5 interpolates the final sample against cached loop[0].
+                   That cache still contains the previous lap's opening. Hold
+                   the decoded tail for this fractional boundary sample instead
+                   of mixing in stale audio. After wrap, the existing refresh
+                   decodes the new opening with uninterrupted ADPCM history. */
+                if(end>0x4000||!native_u32(channel+0x14,&decoded))return 0;
+                if(decoded>=end) {
+                    if(!native_u32(channel+0x20+((end-1)&~1u)*2,&tail)||
+                       !native_u32(channel+0x20+(loop&~1u)*2,&pair))return 0;
+                    tail=(tail>>(((end-1)&1)*16))&0xffff;
+                    pair=(pair&~(0xffffu<<shift))|(tail<<shift);
+                    if(!native_store(channel+0x20+(loop&~1u)*2,pair))return 0;
+                }
+            }
             if(remaining>phase){n=(remaining-phase+step-1)/step;if(n<count)count=(unsigned)n;}
         }
         h->generate(left,right,count);
