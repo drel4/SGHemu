@@ -86,8 +86,24 @@ static void clock_write(void *context,uint32_t offset,unsigned width,uint32_t va
 }
 static void clock_advance(PhoneClock *c,uint64_t cycles)
 {
-    uint64_t scaled;
-    scaled=(cycles-c->clock_cycles)*1000000000+c->fraction;c->clock_cycles=cycles;
+    uint64_t scaled,delta=cycles-c->clock_cycles;
+    c->clock_cycles=cycles;
+    /* An instruction is a handful of cycles. delta*1e9 = q*hz + r exactly, so
+       floor((delta*1e9 + fraction)/hz) = q + (r + fraction >= hz), with the
+       identical remainder. Same result as the division, none of its cost
+       (64-bit division is a library call in an x86 build). */
+    if(delta<33&&c->arm_hz&&c->fraction<c->arm_hz) {
+        uint64_t fraction;
+        if(c->table_hz!=c->arm_hz) {
+            unsigned i;
+            for(i=0;i<33;++i){uint64_t s=(uint64_t)i*1000000000u;c->step_ns[i]=s/c->arm_hz;c->step_rem[i]=(uint32_t)(s%c->arm_hz);}
+            c->table_hz=c->arm_hz;
+        }
+        fraction=c->fraction+c->step_rem[delta];c->nanoseconds+=c->step_ns[delta];
+        if(fraction>=c->arm_hz){fraction-=c->arm_hz;++c->nanoseconds;}
+        c->fraction=fraction;return;
+    }
+    scaled=delta*1000000000+c->fraction;
     c->nanoseconds+=scaled/c->arm_hz;c->fraction=scaled%c->arm_hz;
 }
 void machine_destroy(Machine *m)

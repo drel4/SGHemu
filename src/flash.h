@@ -4,6 +4,7 @@
 typedef struct { uint32_t offset, size, block_size; } FlashGeometry;
 typedef struct {
     Bus *bus;
+    Region *region; /* bus region whose fast-read flag mirrors array mode */
     uint8_t *data;
     uint32_t base, size, block_size, command_address;
     unsigned mode, pending;

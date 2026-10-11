@@ -1,4 +1,6 @@
 /firmware/
+/build.old/
+/src.old/
 /models/**/roms/
 *.lst
 *.s37

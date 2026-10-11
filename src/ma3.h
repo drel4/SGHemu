@@ -15,10 +15,15 @@ typedef struct {
     unsigned delayed_address, delayed_count, delayed_count_bytes;
     uint8_t delayed[1024];
     uint64_t translated, unsupported;
+    uint64_t fifo_clears, partial_drops; /* FIFO clear pulses seen / clears that dropped a half-received packet */
+    unsigned block_frames; /* PCM generated per DLL step; 0 means 480 (10 ms) */
     FILE *trace; char error[256];
 } Ma3;
 int ma3_attach(Ma3 *m,Bus *bus,Intc *intc,uint32_t base,uint32_t irq_mask,uint32_t sequence_quantum_ns);
 int ma3_enable(Ma3 *m,const char *dll,const char *wav,int speakers,uint32_t ticks_hz);
+/* Smaller blocks make chip IRQs and the PCM cursor track emulated time more
+   closely (resolution = block / 48 kHz). Must divide 480 and be at least 16. */
+int ma3_set_block(Ma3 *m,unsigned frames);
 void ma3_advance(Ma3 *m,uint64_t ticks);
 void ma3_destroy(Ma3 *m);
 #endif

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <process.h>
 #include "machine.h"
 #include "firmware.h"
 #include "nvram.h"
@@ -56,10 +57,43 @@ typedef struct {
     unsigned last_key;
     char audio_dll[1024], audio_settings[1024];
     uint32_t audio_ticks_hz;
-    int audio_enabled, audio_paused;
+    int audio_enabled, audio_paused, audio_trace;
+    unsigned audio_block;
+    int reload_defaults; /* set by the emulation thread, consumed by the GUI thread */
 } App;
 static App app;
+/* Threading model:
+   - The emulation thread (emu_main) steps the CPU and drives audio. With
+     hardware audio on, the WaveOut queue's backpressure is the clock.
+   - The GUI thread owns every window. It takes emu_mutex around any code that
+     touches app.m / app.storage, and the emulation thread holds the same mutex
+     while it runs a slice.
+   - The emulation thread must NEVER call a GUI function (MessageBox,
+     SendMessage, MoveWindow, load_model...). The GUI thread would be waiting
+     for the mutex and both sides would deadlock. It posts WM_EMU_EVENT. */
+#define WM_EMU_EVENT (WM_APP + 2)
+#define EMU_RELOAD 1u
+#define EMU_PROVISION_FAILED 2u
+static HANDLE emu_mutex, emu_thread;
+static volatile LONG emu_quit;
+static void emu_lock(void) { WaitForSingleObject(emu_mutex, INFINITE); }
+static void emu_unlock(void) { ReleaseMutex(emu_mutex); }
+#define filesystem_proc filesystem_proc_unlocked
 #include "gui_fs.inc"
+#undef filesystem_proc
+static LRESULT CALLBACK filesystem_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    LRESULT result;
+    /* Messages that can enter a modal move/size loop must not hold the lock. */
+    switch (message) {
+    case WM_SYSCOMMAND: case WM_NCLBUTTONDOWN: case WM_NCHITTEST: case WM_NCMOUSEMOVE:
+    case WM_SETCURSOR: case WM_NCPAINT: case WM_NCACTIVATE:
+        return filesystem_proc_unlocked(window, message, wparam, lparam);
+    default: break;
+    }
+    emu_lock(); result = filesystem_proc_unlocked(window, message, wparam, lparam); emu_unlock();
+    return result;
+}
 static const char *key_names[SGH_MAX_KEYS] = {
     "Soft left", "Up", "Soft right", "Left", "OK", "Right", "Call", "Down", "End",
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#", "C / Back"
@@ -97,11 +131,12 @@ static void update_diagnostics(void)
             f->base, (unsigned long long)f->programs, (unsigned long long)f->erases, f->last_program, f->last_erase);
     }
     if (length < sizeof(text)) length += (size_t)snprintf(text + length, sizeof(text) - length,
-        "\r\nMA-3 audio: %s; timebase %u %s/sec; FIFO bytes %llu, IRQs %llu\r\n"
+        "\r\nMA-3 audio: %s; timebase %u %s/sec; FIFO bytes %llu, IRQs %llu, FIFO clears %llu (partial packet dropped %llu)\r\n"
         "Audio error: %s\r\n",
         app.m.ma3.hw?"experimental hardware":"silent", app.m.clock.attached?1000000000:app.audio_ticks_hz,
         app.m.clock.attached?"nanoseconds":"instruction ticks",
         (unsigned long long)app.m.ma3.fifo_bytes,(unsigned long long)app.m.ma3.irq_events,
+        (unsigned long long)app.m.ma3.fifo_clears,(unsigned long long)app.m.ma3.partial_drops,
         *app.m.ma3.error?app.m.ma3.error:"none");
     if(app.m.clock.attached&&length<sizeof(text))length+=(size_t)snprintf(text+length,sizeof(text)-length,
         "PLL: ARM %u Hz / DSP %u Hz; core cycles %llu; time %.3f s%s\r\n",
@@ -268,7 +303,8 @@ static int load_model(void)
                 *app.m.ma3.error=0; app.audio_enabled=0;
             } else {
                 app.audio_paused=0;
-                app.m.ma3.trace=fopen("build/gui-ma3-traffic.log","w");
+                if(!ma3_set_block(&app.m.ma3,app.audio_block))app.audio_block=480;
+                if(app.audio_trace)app.m.ma3.trace=fopen("build/gui-ma3-traffic.log","w");
             }
         }
     }
@@ -493,8 +529,9 @@ static HMENU make_menu(void)
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "&File"); AppendMenuA(bar, MF_POPUP, (UINT_PTR)emulation, "&Emulation");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "&View"); AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help"); return bar;
 }
-static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam, int *handled)
 {
+    *handled = 1;
     if (message == WM_CREATE) {
         unsigned i;
         app.window = window;
@@ -503,7 +540,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
             app.buttons[i] = CreateWindowA("BUTTON", key_names[i], WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, window, (HMENU)(UINT_PTR)(ID_KEY_BASE + i), NULL, NULL);
             SendMessageA(app.buttons[i], WM_SETFONT, (WPARAM)app.font, TRUE); SetWindowSubclass(app.buttons[i], button_proc, i, 0);
         }
-        SetMenu(window, make_menu()); SetTimer(window, 1, 16, NULL); load_model(); return 0;
+        SetMenu(window, make_menu()); SetTimer(window, 1, 33, NULL); load_model(); return 0;
     }
     if (message == WM_SIZE) { layout(); return 0; }
     if (message == WM_PHONE_KEY) { phone_key((unsigned)wparam, (int)lparam, 1); return 0; }
@@ -512,38 +549,27 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
     if (message == WM_EXITMENULOOP) { app.menu_active = 0; return 0; }
     if (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) { release_keys(); update_ui(); }
     if (message == WM_TIMER) {
+        /* GUI refresh only. Emulation runs on emu_main. */
         if (app.running) {
-            DWORD start = GetTickCount();
-            unsigned i, limit=app.m.ma3.hw?(app.m.clock.attached?1000000:app.audio_ticks_hz/10):120000;
-            DWORD budget=app.m.ma3.hw?32:8;
-            /* Audio backpressure provides pacing. A fixed 40k/16ms batch
-               cannot sustain the chip when WM_TIMER is coalesced or rounded.
-               Allow a bounded refill burst, without changing guest clocks. */
-            if(limit<40000)limit=40000;if(limit>1000000)limit=1000000;
-            for (i = 0; i < limit; ++i) {
-                int provision = nvram_store_step(&app.storage, &app.m);
-                if (!provision) {
-                    app.running = 0; app.state = "Paused - first-boot provisioning failed";
-                    app.m.cpu.halted = 1; app.m.cpu.error = "Guest NVM provisioning failed";
-                    MessageBoxA(app.window, app.m.error, "SGHemu - first boot failed", MB_OK | MB_ICONERROR); break;
-                }
-                if (provision == 2) {
-                    int initialize_defaults = app.storage.provision && app.storage.stage == 3;
-                    if (load_model()) {
-                        app.storage.defaults_boot = initialize_defaults;
-                        app.running = 1; app.state = initialize_defaults ? "First boot - creating persistent defaults" : "Running - initialized NVM";
-                    }
-                    break;
-                }
-                if (!machine_step(&app.m, app.continuation)) { app.running = 0; app.state = app.m.cpu.halted ? "CPU stopped - see diagnostics" : "Unknown hardware - stopped"; break; }
-                if (!(i % 1000) && GetTickCount() - start >= budget) break;
-            }
             if (GetTickCount() - app.nv_checkpoint >= 5000) {
                 app.nv_checkpoint = GetTickCount(); (void)save_storage();
             }
-            if (app.log) fflush(app.log); update_ui(); InvalidateRect(window, &app.lcd, FALSE);
+            if (app.log) fflush(app.log);
+            update_ui(); InvalidateRect(window, &app.lcd, FALSE);
         }
         return 0;
+    }
+    if (message == WM_EMU_EVENT) {
+        if (wparam == EMU_PROVISION_FAILED) {
+            MessageBoxA(app.window, app.m.error, "SGHemu - first boot failed", MB_OK | MB_ICONERROR);
+        } else if (wparam == EMU_RELOAD) {
+            int initialize_defaults = app.reload_defaults;
+            if (load_model()) {
+                app.storage.defaults_boot = initialize_defaults;
+                app.running = 1; app.state = initialize_defaults ? "First boot - creating persistent defaults" : "Running - initialized NVM";
+            }
+        }
+        update_ui(); return 0;
     }
     if (message == WM_PAINT) {
         PAINTSTRUCT ps;
@@ -565,13 +591,80 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         return 0;
     }
     if (message == WM_DESTROY) {
-        KillTimer(window, 1); if (app.diagnostics) DestroyWindow(app.diagnostics);
+        app.running = 0; KillTimer(window, 1); if (app.diagnostics) DestroyWindow(app.diagnostics);
         if(app.fs_window)DestroyWindow(app.fs_window);
         nvram_store_release(&app.storage);
         machine_destroy(&app.m); free(app.test_pixels); if (app.log) fclose(app.log);
         if (app.font) DeleteObject(app.font); PostQuitMessage(0); return 0;
     }
-    return DefWindowProcA(window, message, wparam, lparam);
+    *handled = 0; return 0;
+}
+static int window_needs_lock(UINT message)
+{
+    switch (message) {
+    case WM_CREATE: case WM_SIZE: case WM_PHONE_KEY: case WM_COMMAND: case WM_ENTERMENULOOP:
+    case WM_EXITMENULOOP: case WM_ACTIVATE: case WM_TIMER: case WM_PAINT: case WM_CLOSE:
+    case WM_DESTROY: case WM_EMU_EVENT: return 1;
+    default: return 0;
+    }
+}
+static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    LRESULT result; int handled;
+    /* Everything else (mouse move, hit-testing, move/size loops) never touches
+       app.m, so it must not wait for the emulation thread. */
+    if (!window_needs_lock(message)) return DefWindowProcA(window, message, wparam, lparam);
+    emu_lock(); result = window_message(window, message, wparam, lparam, &handled); emu_unlock();
+    return handled ? result : DefWindowProcA(window, message, wparam, lparam);
+}
+/* Runs on emu_main with emu_mutex held. paced = hardware audio is attached and
+   its output queue (backpressure inside ma5_hw generate) is the clock. */
+static void emu_slice(LONGLONG frequency, int paced)
+{
+    unsigned i, limit = paced ? 20000u : 120000u;
+    LARGE_INTEGER start, now;
+    LONGLONG budget = frequency * 8 / 1000; /* 8 ms wall clock per slice */
+    QueryPerformanceCounter(&start);
+    for (i = 0; i < limit; ++i) {
+        int provision = nvram_store_step(&app.storage, &app.m);
+        if (!provision) {
+            app.running = 0; app.state = "Paused - first-boot provisioning failed";
+            app.m.cpu.halted = 1; app.m.cpu.error = "Guest NVM provisioning failed";
+            PostMessageA(app.window, WM_EMU_EVENT, EMU_PROVISION_FAILED, 0); return;
+        }
+        if (provision == 2) {
+            app.reload_defaults = app.storage.provision && app.storage.stage == 3;
+            app.running = 0; /* idle until the GUI thread has reloaded the model */
+            PostMessageA(app.window, WM_EMU_EVENT, EMU_RELOAD, 0); return;
+        }
+        if (!machine_step(&app.m, app.continuation)) {
+            app.running = 0; app.state = app.m.cpu.halted ? "CPU stopped - see diagnostics" : "Unknown hardware - stopped"; return;
+        }
+        if (!(i % 1000)) {
+            QueryPerformanceCounter(&now);
+            if (now.QuadPart - start.QuadPart >= budget) break;
+        }
+    }
+}
+static unsigned __stdcall emu_main(void *argument)
+{
+    LARGE_INTEGER frequency;
+    (void)argument;
+    QueryPerformanceFrequency(&frequency);
+    while (!emu_quit) {
+        int ran = 0, paced = 0;
+        /* Time-out so shutdown never waits on a lock held by a nested GUI call. */
+        if (WaitForSingleObject(emu_mutex, 20) != WAIT_OBJECT_0) continue;
+        if (app.running && app.m.loaded && !app.m.cpu.halted) {
+            paced = app.m.ma3.hw != NULL; ran = 1;
+            emu_slice(frequency.QuadPart, paced);
+        }
+        ReleaseMutex(emu_mutex);
+        if (!ran) Sleep(10);
+        else if (!paced) Sleep(16); /* no audio clock: same cadence as the old 16 ms timer */
+        else SwitchToThread();
+    }
+    return 0;
 }
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, int show)
 {
@@ -585,6 +678,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     int exit_code;
     (void)previous; (void)command_line;
     app.sim_override=-1;
+    emu_mutex = CreateMutexA(NULL, FALSE, NULL);
+    if (!emu_mutex) return 1;
     /* Both file dialogs and config paths use the project working directory. */
     if (GetModuleFileNameA(NULL, executable, sizeof(executable))) {
         slash = strrchr(executable, '\\'); if (slash) { *slash = 0; slash = strrchr(executable, '\\');
@@ -598,6 +693,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     app.audio_enabled=GetPrivateProfileIntA("audio","enabled",0,app.audio_settings)!=0;
     app.audio_ticks_hz=GetPrivateProfileIntA("audio","ticks_hz",2166667,app.audio_settings);
     if(app.audio_ticks_hz<48000||app.audio_ticks_hz>100000000)app.audio_ticks_hz=2166667;
+    app.audio_block=GetPrivateProfileIntA("audio","block",96,app.audio_settings); /* frames per DLL step: 48, 96, 120, 160, 240 or 480 */
+    app.audio_trace=GetPrivateProfileIntA("audio","trace",0,app.audio_settings)!=0; /* traffic log is slow: opt in with trace=1 */
     InitCommonControlsEx(&common);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     strcpy(app.model, "models/c100/c100xeda2.cfg"); app.zoom = 2; app.state = "Paused"; app.last_key = SGH_MAX_KEYS;
@@ -613,6 +710,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
         CW_USEDEFAULT, CW_USEDEFAULT, 400, 800, NULL, NULL, instance, NULL)) return 1;
     accelerator = CreateAcceleratorTableA(keys, sizeof(keys) / sizeof(keys[0]));
     ShowWindow(app.window, show); UpdateWindow(app.window);
+    {
+        uintptr_t thread_handle = _beginthreadex(NULL, 0, emu_main, NULL, 0, NULL);
+        if (!thread_handle) return 1;
+        emu_thread = (HANDLE)thread_handle;
+        SetThreadPriority(emu_thread, THREAD_PRIORITY_ABOVE_NORMAL);
+    }
     while ((exit_code = GetMessageA(&message, NULL, 0, 0)) > 0) {
         if (TranslateAcceleratorA(app.window, accelerator, &message)) continue;
         if (!app.menu_active && (message.hwnd == app.window || IsChild(app.window, message.hwnd)) && message.wParam < 256 &&
@@ -625,14 +728,17 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
                 app.vk_keys[vk] = message.message == WM_KEYUP ? -1 : key;
                 for (i = 0; i < 256; ++i) if (app.vk_keys[i] >= 0) held |= 1u << app.vk_keys[i];
                 app.keyboard_keys = held;
-                phone_key((unsigned)key, !!(held & (1u << key)), 0); continue;
+                emu_lock(); phone_key((unsigned)key, !!(held & (1u << key)), 0); emu_unlock(); continue;
             }
         }
         /* Dialog navigation must not consume Alt+menu mnemonics. */
         if (message.message == WM_SYSCHAR || message.message == WM_SYSKEYDOWN || message.message == WM_SYSKEYUP ||
             !IsDialogMessageA(app.window, &message)) { TranslateMessage(&message); DispatchMessageA(&message); }
     }
+    InterlockedExchange(&emu_quit, 1);
+    if (emu_thread) { WaitForSingleObject(emu_thread, 5000); CloseHandle(emu_thread); emu_thread = NULL; }
     if (accelerator) DestroyAcceleratorTable(accelerator);
+    CloseHandle(emu_mutex);
     CoUninitialize();
     return exit_code == -1 ? 1 : (int)message.wParam;
 }

@@ -189,7 +189,7 @@ static uint32_t read_ma3(void *ctx,uint32_t off,unsigned width)
 }
 static void write_ma3(void *ctx,uint32_t off,unsigned width,uint32_t value)
 {
-    Ma3 *m=ctx;unsigned reset_sequence=0;
+    Ma3 *m=ctx;unsigned reset_sequence=0,clear_fifo=0;
     if(width!=1||(off!=0&&off!=4)){bus_fault_access(m->bus,1,m->base+off,width,value,"MA-3 requires byte port access");return;}
     ++m->writes;if(off==0) {
         m->selector=value&255;
@@ -199,7 +199,17 @@ static void write_ma3(void *ctx,uint32_t off,unsigned width,uint32_t value)
     if(off==4) {
         if((m->selector&63)==4){
             reset_sequence=(value&~m->control)&8;
+            clear_fifo=(value&~m->control)&0x20;
             if(value&128)reset_parameters(m);m->bank=value&3;m->control=value&255;
+        }
+        if(clear_fifo) {
+            /* The chip's FIFO, and any half-received packet in it, is gone. The
+               translation layer assembles packets before handing them to the
+               DLL, so it must forget its partial packet too; otherwise the first
+               bytes of the next tune are glued onto the interrupted one and the
+               opening instrument/tempo setup is misparsed or lost. */
+            ++m->fifo_clears;if(m->delayed_phase||m->delayed_length)++m->partial_drops;
+            m->delayed_phase=m->delayed_length=m->delayed_address=m->delayed_count=m->delayed_count_bytes=0;
         }
         if((m->selector&63)==1)delayed_packet(m,value);
         parameter_packet(m,value);
@@ -244,15 +254,24 @@ int ma3_enable(Ma3 *m,const char *dll,const char *wav,int speakers,uint32_t tick
     m->hw=ma5_hw_open(dll,wav,speakers,m->error,sizeof(m->error));if(!m->hw)return 0;
     m->ticks_hz=ticks_hz;m->last_tick=m->bus->ticks;m->fractional=m->pending_frames=0;return 1;
 }
+int ma3_set_block(Ma3 *m,unsigned frames)
+{
+    if(frames<16||frames>480||480%frames)return 0;
+    m->block_frames=frames;return 1;
+}
 void ma3_advance(Ma3 *m,uint64_t ticks)
 {
     uint64_t scaled;
+    unsigned block=m->block_frames?m->block_frames:480;
     if(!m->hw)return;
     scaled=m->fractional+(ticks-m->last_tick)*48000;m->last_tick=ticks;
-    m->pending_frames+=scaled/m->ticks_hz;m->fractional=scaled%m->ticks_hz;
-    /* Ten-millisecond blocks; the backend buffers host scheduling jitter. */
-    while(m->pending_frames>=480){unsigned count=480;
-        if(!ma5_hw_generate(m->hw,count)){strcpy(m->error,"Hardware PCM generation/output failed");return;}m->pending_frames-=count;}
+    if(scaled<m->ticks_hz)m->fractional=scaled; /* under one frame: no division needed */
+    else {
+        m->pending_frames+=scaled/m->ticks_hz;m->fractional=scaled%m->ticks_hz;
+        /* The backend stages short blocks into 10 ms sound-card buffers. */
+        while(m->pending_frames>=block){unsigned count=block;
+            if(!ma5_hw_generate(m->hw,count)){strcpy(m->error,"Hardware PCM generation/output failed");return;}m->pending_frames-=count;}
+    }
     if(ma5_hw_irq(m->hw)){m->intc->pending|=m->irq_mask;++m->irq_events;}
 }
 void ma3_destroy(Ma3 *m)

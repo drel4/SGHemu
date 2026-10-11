@@ -3,12 +3,14 @@
 #include <stdint.h>
 #include <stdio.h>
 #define BUS_MAX_REGIONS 32
+#define BUS_PAGE_SHIFT 16
 typedef uint32_t (*PeripheralRead)(void *, uint32_t, unsigned);
 typedef void (*PeripheralWrite)(void *, uint32_t, unsigned, uint32_t);
 typedef struct {
     uint32_t base, size;
     uint8_t *data;
     int readonly, owned;
+    int fast; /* read callback may be bypassed: data[] is currently exact (flash array mode) */
     PeripheralRead read;
     PeripheralWrite write;
     void *context;
@@ -25,6 +27,8 @@ typedef struct {
     uint32_t last_address, last_value;
     unsigned last_width;
     int last_write;
+    int pages_ready; /* page[] is rebuilt lazily after regions change */
+    uint8_t page[1u << (32 - BUS_PAGE_SHIFT)]; /* region index + 1 when one region owns the whole 64 KiB page */
 } Bus;
 int bus_map(Bus *b, uint32_t base, uint32_t size, uint8_t *data, int readonly, int owned);
 int bus_device(Bus *b, uint32_t base, uint32_t size, PeripheralRead read, PeripheralWrite write, void *ctx);

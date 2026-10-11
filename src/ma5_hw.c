@@ -11,7 +11,9 @@
 #if !defined(_M_IX86)
 #error Yamaha hardware backend requires x86
 #endif
-#define OUTPUT_SLOTS 8
+/* 10 ms per slot. 12 slots = 120 ms of queued PCM to ride out host scheduling
+   hiccups. Raise for more margin, lower for less output latency. */
+#define OUTPUT_SLOTS 12
 typedef int (__cdecl *HwInit)(unsigned, unsigned char, void (__cdecl *)(void));
 typedef void (__cdecl *HwTerm)(void);
 typedef void (__cdecl *HwGenerate)(int16_t *, int16_t *, unsigned);
@@ -23,6 +25,7 @@ struct Ma5Hw {
     HwInit init; HwTerm term; HwGenerate generate;
     HwWrite write_status, write_data; HwRead read_status, read_data;
     HWAVEOUT wave; WAVEHDR headers[OUTPUT_SLOTS]; int16_t pcm[OUTPUT_SLOTS][960]; unsigned next;
+    int16_t stage[960]; unsigned fill; /* short blocks collect here until a full 480-frame buffer is ready */
     FILE *wav; char path[1024], wav_path[1024], error[256];
     int speakers, initialized, op, paused, timer_period; unsigned arg, result;
     volatile LONG irq, callbacks;
@@ -154,11 +157,22 @@ static int wav_header(Ma5Hw *h)
 }
 static int generate(Ma5Hw *h,unsigned frames)
 {
-    int16_t left[482]={0},right[482]={0};unsigned i,slot=h->next;WAVEHDR *header=&h->headers[slot];
-    if(!frames||frames>480||(h->wav&&h->stats.frames>(UINT32_MAX-36u)/4u-frames))return 0;
+    int16_t left[482]={0},right[482]={0};unsigned i,slot;WAVEHDR *header;
+    if(!frames||frames>480||h->fill+frames>480||(h->wav&&h->stats.frames>(UINT32_MAX-36u)/4u-frames))return 0;
     left[0]=left[frames+1]=12345;right[0]=right[frames+1]=12345;
     if(!synthesize(h,left+1,right+1,frames))return 0;
     if(left[0]!=12345||left[frames+1]!=12345||right[0]!=12345||right[frames+1]!=12345)return 0;
+    /* The DLL runs in short steps so its sequencer, IRQs and PCM cursor stay
+       close to emulated time; the sound card still receives 10 ms buffers. */
+    for(i=0;i<frames;++i) {
+        int l=left[i+1],r=right[i+1];unsigned a=(unsigned)(l<0?-l:l),b=(unsigned)(r<0?-r:r);
+        h->stage[(h->fill+i)*2]=(int16_t)l;h->stage[(h->fill+i)*2+1]=(int16_t)r;
+        if(l)++h->stats.nonzero;if(r)++h->stats.nonzero;
+        if(a>h->stats.peak)h->stats.peak=a;if(b>h->stats.peak)h->stats.peak=b;
+    }
+    h->fill+=frames;
+    if(h->fill<480)return 1;
+    frames=h->fill;h->fill=0;slot=h->next;header=&h->headers[slot];
     if(h->wave && (header->dwFlags&WHDR_PREPARED)) {
         unsigned finished=0;
         /* A fully drained, previously filled ring means the host ran out of
@@ -169,12 +183,7 @@ static int generate(Ma5Hw *h,unsigned frames)
         while(!(header->dwFlags&WHDR_DONE)) { if(WaitForSingleObject(h->wave_event,2000)==WAIT_TIMEOUT)return 0; }
         if(waveOutUnprepareHeader(h->wave,header,sizeof(*header))!=MMSYSERR_NOERROR)return 0;
     }
-    for(i=0;i<frames;++i) {
-        int l=left[i+1],r=right[i+1];unsigned a=(unsigned)(l<0?-l:l),b=(unsigned)(r<0?-r:r);
-        h->pcm[slot][i*2]=(int16_t)l;h->pcm[slot][i*2+1]=(int16_t)r;
-        if(l)++h->stats.nonzero;if(r)++h->stats.nonzero;
-        if(a>h->stats.peak)h->stats.peak=a;if(b>h->stats.peak)h->stats.peak=b;
-    }
+    memcpy(h->pcm[slot],h->stage,(size_t)frames*4);
     if(h->wav&&fwrite(h->pcm[slot],4,frames,h->wav)!=frames)return 0;
     h->stats.frames+=frames;
     if(h->wave) {
@@ -190,6 +199,8 @@ static int generate(Ma5Hw *h,unsigned frames)
 static unsigned __stdcall worker(void *arg)
 {
     Ma5Hw *h=arg;unsigned i;WAVEFORMATEX format={0};
+    /* This thread renders PCM for the sound card; keep it ahead of normal work. */
+    SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_ABOVE_NORMAL);
     if(!verify(h->path)){strcpy(h->error,"Hardware DLL hash/version mismatch or unreadable file (requires pinned 1.6.0.0)");goto failed;}
     h->dll=LoadLibraryExA(h->path,NULL,LOAD_WITH_ALTERED_SEARCH_PATH);if(!h->dll)goto failed;
     LOAD(init,"Hw_Initialize");LOAD(term,"Hw_Terminate");LOAD(generate,"Hw_Generate");
@@ -218,7 +229,7 @@ static unsigned __stdcall worker(void *arg)
         case 3:h->write_data((unsigned char)h->arg);break;
         case 4:if(!generate(h,h->arg)){h->stats.failed=1;h->result=0;}break;
         case 5:goto cleanup;
-        case 6:h->term();h->initialized=0;h->irq=0;memset(h->adpcm_dirty,0,sizeof(h->adpcm_dirty));
+        case 6:h->term();h->initialized=0;h->irq=0;h->fill=0;memset(h->adpcm_dirty,0,sizeof(h->adpcm_dirty));
             if(h->init(48000,0,irq_callback)!=0x46){h->stats.failed=1;h->result=0;}else h->initialized=1;break;
         case 7:if(h->wave){if(h->arg)waveOutPause(h->wave);else waveOutRestart(h->wave);}h->paused=(int)h->arg;break;
         case 8:
@@ -326,7 +337,8 @@ unsigned ma5_hw_memory(Ma5Hw *h,unsigned address,int full_ram){return command(h,
 unsigned ma5_hw_pcm_cursor(Ma5Hw *h,unsigned voice){return command(h,14,voice);}
 void ma5_hw_ram_changed(Ma5Hw *h,unsigned address,unsigned length){(void)command(h,15,(length<<16)|(address&0xffff));}
 void ma5_hw_register(Ma5Hw *h,unsigned reg,unsigned value,unsigned bank){(void)command(h,10,(bank<<16)|(reg<<8)|(value&255));}
-int ma5_hw_irq(Ma5Hw *h){return h?(int)InterlockedExchange(&h->irq,0):0;}
+/* Called once per emulated instruction: a plain read first, the interlocked exchange only when set. */
+int ma5_hw_irq(Ma5Hw *h){return h&&h->irq?(int)InterlockedExchange(&h->irq,0):0;}
 int ma5_hw_stress(Ma5Hw *h){return (int)command(h,8,0);}
 Ma5HwStats ma5_hw_stats(Ma5Hw *h){Ma5HwStats result={0};if(h){result=h->stats;result.callbacks=(uint64_t)(unsigned)InterlockedCompareExchange(&h->callbacks,0,0);}return result;}
 void ma5_hw_diagnostics(Ma5Hw *h){(void)command(h,12,0);}

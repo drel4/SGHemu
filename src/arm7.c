@@ -145,6 +145,16 @@ static uint32_t load_half(Arm7 *c, uint32_t a, int sign)
     if (sign) return (uint32_t)(int32_t)(int16_t)v;
     return ror(v, (a & 1) * 8);
 }
+/* True for ARM data-processing encodings that cannot be mistaken for any of
+   the special forms sharing opcode space with them (BX, MRS, MSR, multiplies,
+   SWP, halfword transfers). Those all either have bits 7 and 4 set with
+   bit 25 clear, or sit in the "TST/TEQ/CMP/CMN without S" hole (bits 24:23 =
+   10, bit 20 = 0). Anything else keeps taking the original decode ladder. */
+static int plain_data_processing(uint32_t op)
+{
+    return (op & 0x0c000000u) == 0 && (op & 0x01900000u) != 0x01000000u &&
+        ((op & 0x02000000u) || (op & 0x90u) != 0x90u);
+}
 static int arm(Arm7 *c, uint32_t op)
 {
     unsigned rn = (op >> 16) & 15, rd = (op >> 12) & 15;
@@ -152,6 +162,11 @@ static int arm(Arm7 *c, uint32_t op)
     uint32_t a, b, v, address;
     if ((op >> 28) == 15) return fail(c, "ARMv4T NV/reserved instruction");
     if (!cond(c, op >> 28)) return 1;
+    if (plain_data_processing(op)) goto data_processing; /* the common case: skip seven failed mask tests */
+    /* Bits 27:26 = 01 (LDR/STR) and bits 27:25 = 101 (B/BL) can only be those
+       instructions; every special form tested below lives in the 00x space. */
+    if ((op & 0x0c000000u) == 0x04000000u) goto single_transfer;
+    if ((op & 0x0e000000u) == 0x0a000000u) goto branch;
     if ((op & 0x0ffffff0u) == 0x012fff10u) { bx(c, reg(c, rm)); return 1; }
     if ((op & 0x0fbf0fffu) == 0x010f0000u) {
         if (rd == 15) return fail(c, "unpredictable MRS pc");
@@ -215,6 +230,7 @@ static int arm(Arm7 *c, uint32_t op)
         }
         return 1;
     }
+    data_processing:
     if ((op & 0x0c000000u) == 0) {
         unsigned code = (op >> 21) & 15, flags = (op >> 20) & 1;
         int write = code < 8 || code > 11;
@@ -256,6 +272,7 @@ static int arm(Arm7 *c, uint32_t op)
         }
         return 1;
     }
+    single_transfer:
     if ((op & 0x0c000000u) == 0x04000000u) {
         unsigned load = (op >> 20) & 1, width = (op & 0x00400000u) ? 1u : 4u;
         a = reg(c, rn);
@@ -304,6 +321,7 @@ static int arm(Arm7 *c, uint32_t op)
         if (has_pc) { if (s && !restore(c)) return 0; pc_write(c, loaded_pc); }
         return 1;
     }
+    branch:
     if ((op & 0x0e000000u) == 0x0a000000u) {
         uint32_t offset = (op & 0xffffffu) << 2;
         if (offset & 0x2000000u) offset |= 0xfc000000u;
@@ -459,6 +477,13 @@ static unsigned instruction_cycles(const Arm7 *c,uint32_t op)
     unsigned n,load,rd;
     if(!(c->cpsr&ARM_T)) {
         if(!cond(c,op>>28))return 1;
+        if(plain_data_processing(op)) {
+            /* Same result as the final data-processing branch below. */
+            n=(!(op&(1u<<25))&&!!(op&16))?2:1;rd=(op>>12)&15;
+            return n+((rd==15&&((op>>21)&15)!=8&&((op>>21)&15)!=9&&((op>>21)&15)!=10&&((op>>21)&15)!=11)?2:0);
+        }
+        if((op&0x0c000000u)==0x04000000u){load=(op>>20)&1;rd=(op>>12)&15;return load?3+(rd==15?2:0):2;} /* single LDR/STR */
+        if((op&0x0e000000u)==0x0a000000u)return 3; /* B/BL */
         if((op&0x0fbf0fffu)==0x010f0000u||(op&0x0fb0fff0u)==0x0120f000u||(op&0x0fb0f000u)==0x0320f000u)return 1;
         if((op&0x0ffffff0u)==0x012fff10u||(op&0x0e000000u)==0x0a000000u||(op&0x0f000000u)==0x0f000000u)return 3;
         if((op&0x0f8000f0u)==0x00800090u)return 2+multiply_cycles(c->r[(op>>8)&15],!!(op&(1u<<22)))+!!(op&(1u<<21));
@@ -471,6 +496,7 @@ static unsigned instruction_cycles(const Arm7 *c,uint32_t op)
             return n+((rd==15&&((op>>21)&15)!=8&&((op>>21)&15)!=9&&((op>>21)&15)!=10&&((op>>21)&15)!=11)?2:0);}
         return 1;
     }
+    if(op<0x4000)return 1; /* shifts, add/sub, immediate ALU: one cycle, none of the tests below can match */
     if((op&0xfc00)==0x4000){n=(op>>6)&15;if(n==13)return 1+multiply_cycles(c->r[(op>>3)&7],1);return ((n>=2&&n<=4)||n==7)?2:1;}
     if((op&0xfc00)==0x4400){n=(op>>8)&3;rd=(op&7)|((op>>4)&8);return n==3||((n==0||n==2)&&rd==15)?3:1;}
     if((op&0xf800)==0x4800)return 3;

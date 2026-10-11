@@ -22,6 +22,9 @@ typedef struct {
     uint32_t arm_rates[8], dsp_rates[8];
     unsigned count;
     uint64_t nanoseconds, fraction, clock_cycles;
+    /* Per-step conversion cache: delta cycles -> whole ns and remainder at
+       table_hz, so the hot path needs no 64-bit division. */
+    uint64_t step_ns[33]; uint32_t step_rem[33], table_hz;
     int attached, unknown;
 } PhoneClock;
 typedef struct {

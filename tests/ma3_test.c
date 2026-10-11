@@ -134,6 +134,26 @@ int main(void)
     ss(1);for(i=0;i<1025;++i)data(0);CHECK(*m.error);
     *m.error=0;ss(2);data(0);data(0);data(0);data(0);
     CHECK(strstr(m.error,"immediate address")!=NULL);
+    /* Clearing the FIFO discards a half-received packet instead of gluing the
+       next tune's first packet onto it. */
+    {unsigned good[16],good_count,i2;uint64_t drops;
+        /* The bound-overflow test above leaves the delayed parser full; start clean. */
+        *m.error=0;m.delayed_phase=m.delayed_length=m.delayed_address=m.delayed_count=m.delayed_count_bytes=0;drops=m.partial_drops;
+        count=0;ss(1);data(0x80);data(0x63);data(0x81);data(0xec);
+        good_count=count;CHECK(good_count>0&&good_count<=16);for(i2=0;i2<good_count;++i2)good[i2]=values[i2];
+        ss(1);data(0x80);data(0x63);  /* interrupted mid-address */
+        CHECK(m.delayed_phase!=0);
+        ss(4);data(0x28);data(0);     /* ClearFifo pulse */
+        CHECK(m.delayed_phase==0&&m.delayed_length==0);CHECK(m.partial_drops==drops+1);
+        count=0;ss(1);data(0x80);data(0x63);data(0x81);data(0xec);
+        CHECK(count==good_count);for(i2=0;i2<good_count;++i2)CHECK(values[i2]==good[i2]);
+        ss(4);data(0x20);data(0);CHECK(m.partial_drops==drops+1); /* idle clear: nothing dropped */}
+    /* Short generation blocks: same total time, finer chip/CPU interleaving. */
+    CHECK(!ma3_set_block(&m,100));CHECK(!ma3_set_block(&m,8));CHECK(!ma3_set_block(&m,0));CHECK(ma3_set_block(&m,96));
+    {uint64_t t;unsigned before=frames;m.pending_frames=0;m.fractional=0;t=m.last_tick;
+        ma3_advance(&m,t+95);CHECK(frames==before);
+        ma3_advance(&m,t+96);CHECK(frames==before+96);
+        ma3_advance(&m,t+480);CHECK(frames==before+480);}
     ma3_destroy(&m);CHECK(!m.hw);bus_destroy(&bus);
     printf("MA-3: %u checks passed\n",checks);return 0;
 }

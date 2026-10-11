@@ -19,7 +19,7 @@ static uint32_t read_flash(void *context, uint32_t offset, unsigned width)
     for (i = 0; i < width; ++i) value |= (uint32_t)f->data[offset + i] << (i * 8);
     return value;
 }
-static void write_flash(void *context, uint32_t offset, unsigned width, uint32_t value)
+static void write_flash_command(void *context, uint32_t offset, unsigned width, uint32_t value)
 {
     Flash *f = context;
     unsigned i;
@@ -67,6 +67,14 @@ static void write_flash(void *context, uint32_t offset, unsigned width, uint32_t
     default: bus_fault_access(f->bus, 1, f->base + offset, width, value, "unimplemented flash command"); break;
     }
 }
+static void write_flash(void *context, uint32_t offset, unsigned width, uint32_t value)
+{
+    Flash *f = context;
+    write_flash_command(context, offset, width, value);
+    /* Array mode reads are plain memory reads; skip the callback for them.
+       Status and identify modes still go through read_flash(). */
+    if (f->region) f->region->fast = f->mode == ARRAY;
+}
 int flash_geometry(Flash *f, uint32_t offset, uint32_t size, uint32_t block_size)
 {
     unsigned i;
@@ -90,7 +98,9 @@ int flash_attach(Flash *f, Bus *bus, uint32_t base, uint16_t manufacturer, uint1
             memset(f, 0, sizeof(*f)); f->bus = bus; f->data = r->data;
             f->base = base; f->size = r->size; f->block_size = 0x10000;
             f->manufacturer = manufacturer; f->device = device; f->status = 0x80;
-            r->read = read_flash; r->write = write_flash; r->context = f; return 1;
+            r->read = read_flash; r->write = write_flash; r->context = f;
+            f->region = r; r->fast = 1; /* power-up state is array mode */
+            return 1;
         }
     }
     return 0;
