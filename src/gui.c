@@ -13,6 +13,7 @@
 #include "firmware.h"
 #include "nvram.h"
 #include "userfs.h"
+#include "content.h"
 #define ID_OPEN_MODEL 100
 #define ID_OPEN_ROM 101
 #define ID_RESET 102
@@ -24,6 +25,8 @@
 #define ID_FS_REFRESH 300
 #define ID_FS_DIRECTORY 301
 #define ID_FS_BACKUP 302
+#define ID_FS_IMPORT 303
+#define ID_FS_JAVA 304
 #define ID_RUN 110
 #define ID_PAUSE 111
 #define ID_STEP 112
@@ -46,6 +49,7 @@ typedef struct {
     HWND window, buttons[SGH_MAX_KEYS], diagnostics, diagnostic_edit;
     HWND fs_window,fs_list,fs_status;
     UserDirectory fs_directory;
+    ContentImport content; /* Armed by Import...; driven on the emulation thread. */
     HFONT font;
     FILE *log;
     char model[1024], rom[1024], second_rom[1024], nv_input[1024];
@@ -74,10 +78,14 @@ static App app;
 #define WM_EMU_EVENT (WM_APP + 2)
 #define EMU_RELOAD 1u
 #define EMU_PROVISION_FAILED 2u
+#define EMU_IMPORT_DONE 3u
+#define EMU_IMPORT_FAILED 4u
 static HANDLE emu_mutex, emu_thread;
 static volatile LONG emu_quit;
 static void emu_lock(void) { WaitForSingleObject(emu_mutex, INFINITE); }
 static void emu_unlock(void) { ReleaseMutex(emu_mutex); }
+static void update_ui(void);
+static int load_model(void);
 #define filesystem_proc filesystem_proc_unlocked
 #include "gui_fs.inc"
 #undef filesystem_proc
@@ -313,6 +321,25 @@ static int load_model(void)
         app.test_pixels = calloc((size_t)app.m.width * app.m.height, sizeof(uint32_t));
         pattern.width = app.m.width; pattern.height = app.m.height; pattern.pixels = app.test_pixels;
         machine_pattern(&pattern, 1);
+        /* MA3_ACCESS_WATCH=start,end[;start,end...] arms the same bus watch used by
+           --mmio-trace over arbitrary guest ranges, writes only, so a RAM state
+           field can be attributed to the guest PC that changed it. Multiple ranges
+           (semicolon separated) allow correlating the MA-3 driver block and the
+           sequencer block on the same tick timeline. Diagnostics only. Do NOT call
+           setvbuf here: MSVC's CRT fast-fails on _IOLBF with size 0. A normal exit
+           flushes the stream, so close the window rather than killing it. */
+        {
+            const char *range = getenv("MA3_ACCESS_WATCH");
+            if (range && *range) {
+                FILE *log = fopen("build/gui-ram-watch.log", "w");
+                if (log) {
+                    if (bus_watch_parse(&app.m.bus, range)) {
+                        app.m.bus.access_log = log;
+                        app.m.bus.watch_writes_only = 1;
+                    } else fclose(log);
+                }
+            }
+        }
     }
     app.last_key = SGH_MAX_KEYS; fit_window(); update_ui();
     return app.m.loaded && !app.m.cpu.halted;
@@ -329,6 +356,7 @@ static void choose_file(int firmware)
     app.running = 0; app.state = "Paused"; release_keys(); update_ui();
     if (GetOpenFileNameA(&ofn)) {
         *app.nv_input = 0;
+        content_import_release(&app.content);
         if (firmware == 2) strcpy(app.second_rom, path);
         else if (firmware) strcpy(app.rom, path);
         else { strcpy(app.model, path); *app.rom = 0; *app.second_rom = 0; }
@@ -456,7 +484,7 @@ static void command(unsigned id)
     case ID_NV_LOAD: choose_nvram(); break;
     case ID_USERFS:
         if(!app.fs_window)CreateWindowExA(0,"SGHemuFilesystem","SGHemu - phone filesystem manager",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VISIBLE,
-            CW_USEDEFAULT,CW_USEDEFAULT,578,432,app.window,NULL,GetModuleHandleA(NULL),NULL);
+            CW_USEDEFAULT,CW_USEDEFAULT,640,480,app.window,NULL,GetModuleHandleA(NULL),NULL);
         else {fs_refresh();ShowWindow(app.fs_window,SW_RESTORE);SetForegroundWindow(app.fs_window);}break;
     case ID_RUN:
         if (app.m.loaded && !app.m.cpu.halted) { app.running = 1; app.state = "Running"; }
@@ -568,6 +596,13 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
                 app.storage.defaults_boot = initialize_defaults;
                 app.running = 1; app.state = initialize_defaults ? "First boot - creating persistent defaults" : "Running - initialized NVM";
             }
+        } else if (wparam == EMU_IMPORT_DONE) {
+            SetWindowTextA(app.fs_status, app.content.type==10 ? (app.content.size ? "Native Java installer started. Follow the phone screen; wait for Installed before closing." : "Native Java menu opened on the phone screen.") : "Import accepted by the guest; the flash task stores it as the boot continues.");
+            content_import_release(&app.content); /* The guest keeps only its own copy in guest RAM. */
+            fs_refresh();
+        } else if (wparam == EMU_IMPORT_FAILED) {
+            MessageBoxA(app.window, app.content.error, "SGHemu - import failed", MB_OK | MB_ICONERROR);
+            content_import_release(&app.content);
         }
         update_ui(); return 0;
     }
@@ -594,6 +629,7 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
         app.running = 0; KillTimer(window, 1); if (app.diagnostics) DestroyWindow(app.diagnostics);
         if(app.fs_window)DestroyWindow(app.fs_window);
         nvram_store_release(&app.storage);
+        content_import_release(&app.content);
         machine_destroy(&app.m); free(app.test_pixels); if (app.log) fclose(app.log);
         if (app.font) DeleteObject(app.font); PostQuitMessage(0); return 0;
     }
@@ -636,6 +672,16 @@ static void emu_slice(LONGLONG frequency, int paced)
             app.reload_defaults = app.storage.provision && app.storage.stage == 3;
             app.running = 0; /* idle until the GUI thread has reloaded the model */
             PostMessageA(app.window, WM_EMU_EVENT, EMU_RELOAD, 0); return;
+        }
+        if (app.content.active && !app.content.done && !app.content.failed) {
+            int imported = content_import_step(&app.content, &app.m);
+            if (!imported) {
+                app.running = 0;
+                PostMessageA(app.window, WM_EMU_EVENT, EMU_IMPORT_FAILED, 0); return;
+            }
+            /* On acceptance keep running: the guest's flash task still has to store
+               the queued record and its data before the next NVM save. */
+            if (imported == 2) PostMessageA(app.window, WM_EMU_EVENT, EMU_IMPORT_DONE, 0);
         }
         if (!machine_step(&app.m, app.continuation)) {
             app.running = 0; app.state = app.m.cpu.halted ? "CPU stopped - see diagnostics" : "Unknown hardware - stopped"; return;

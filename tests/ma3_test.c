@@ -4,7 +4,7 @@
 /* Protocol tests use a recording hardware transport, not proprietary DLLs. */
 struct Ma5Hw { unsigned unused; };
 static struct Ma5Hw mock;
-static unsigned checks, count, ports[4096], values[4096], frames, irq;
+static unsigned checks, count, ports[4096], values[4096], frames, irq, pumps;
 static unsigned parameter_address, parameter_value, registers[64];
 static unsigned memory_address,memory_full,memory_value;
 static unsigned native_selector,native_low,native_high;
@@ -26,6 +26,7 @@ unsigned ma5_hw_memory(Ma5Hw *h,unsigned a,int full){(void)h;memory_address=a;me
 unsigned ma5_hw_pcm_cursor(Ma5Hw *h,unsigned voice){(void)h;sample_voice=voice;return sample_cursor;}
 void ma5_hw_register(Ma5Hw *h,unsigned r,unsigned v,unsigned bank){(void)h;(void)bank;CHECK(r<64);registers[r]=v;}
 int ma5_hw_generate(Ma5Hw *h,unsigned n){(void)h;frames+=n;return 1;}
+void ma5_hw_pump(Ma5Hw *h){(void)h;++pumps;}
 int ma5_hw_irq(Ma5Hw *h){unsigned result=irq;(void)h;irq=0;return (int)result;}
 static Bus bus;
 static void ss(unsigned v){bus_write(&bus,0x200000,1,v);}
@@ -45,17 +46,20 @@ int main(void)
     CHECK(!ma3_attach(&m,&bus,&intc,0x200000,1,1157));
     CHECK(!ma3_enable(&m,"mock",NULL,0,47999));
     CHECK(ma3_enable(&m,"mock",NULL,0,48000));
+    CHECK(registers[0x38]==1); /* DLL FM engine must be armed for 32 voices. */
     CHECK(read_parameter(0x90)==0x60);CHECK(read_parameter(0xa0)==0x3c);
     CHECK(read_parameter(0x14a)==0x40);
     ss(2);data(0x10);data(0x81);data(0xe4);
     CHECK(parameter_address==0xc0);CHECK(parameter_value==0xe4);
     CHECK(read_parameter(0x90)==0x64);
-    ss(4);data(0x80);data(0);CHECK(read_parameter(0x90)==0x60);
+    ss(4);registers[0x38]=0;data(0x80);data(0);CHECK(read_parameter(0x90)==0x60);
+    CHECK(registers[0x38]==1); /* The raw reset rebuilds the engine, so 32-voice mode must be re-armed after it. */
     /* Firmware 1B,00 is a 3456-unit divider, not native register 1B00/4. */
     ss(2);data(0x5e);data(0x82);data(0x1b);data(0x80);
     CHECK(registers[0x23]==0x39);CHECK(registers[0x24]==0x94);
     /* Explicit sequence reset rebases time, unlike ordinary pause/resume. */
     ss(2);data(0x61);data(0x82);data(0x81);CHECK(registers[0x26]==1);
+    CHECK(pumps==1&&frames==0); /* Startup commands run without advancing PCM time. */
     ss(4);data(8);CHECK(registers[0x26]==3);
     registers[0x26]=99;data(8);CHECK(registers[0x26]==99);
     data(0);CHECK(registers[0x26]==99);data(8);CHECK(registers[0x26]==3);

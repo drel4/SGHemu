@@ -46,7 +46,14 @@ static void immediate_parameter(Ma3 *m,unsigned address,unsigned value)
     unsigned mapped=translate_address(address);
     if(!m->hw)return;
     if(mapped!=UINT32_MAX){ma5_hw_parameter(m->hw,mapped,translate_value(address,value));++m->translated;}
-    else if(address==0x161){ma5_hw_register(m->hw,0x26,value&3,m->bank);++m->translated;}
+    else if(address==0x161){
+        ma5_hw_register(m->hw,0x26,value&3,m->bank);
+        /* SeekControl starts, polls the FIFO sixteen times, then stops/clears.
+           Waiting for the next PCM block loses its zero-delay setup commands.
+           Execute due commands now without generating samples or time. */
+        if(value&1)ma5_hw_pump(m->hw);
+        ++m->translated;
+    }
     else if(address==0x15e){++m->translated; /* High 7-bit divider field, latch on low write. */}
     else if(address==0x15f){
         /* C100 SetSpeed packs (divider >> 7), (divider & 127), not MA-5's
@@ -231,6 +238,9 @@ static void write_ma3(void *ctx,uint32_t off,unsigned width,uint32_t value)
         }
         else if((m->selector&63)>3||(m->selector&63)==0) {
             ma5_hw_write(m->hw,0,m->selector);ma5_hw_write(m->hw,1,value);
+            /* The raw reset above rebuilds the DLL engine and returns it to
+               16 voices. This must follow that write, not precede it. */
+            if((m->selector&63)==4&&(value&128))ma5_hw_register(m->hw,0x38,1,m->bank);
             /* C100 ClearFifo uses 0x28; refill recovery uses clear 0x20,
                then reset 0x08 before restarting. Native MA-5 bit 3 only
                resets its parser, leaving the cumulative tick/deadline pair
@@ -252,6 +262,14 @@ int ma3_enable(Ma3 *m,const char *dll,const char *wav,int speakers,uint32_t tick
 {
     if(!m->attached||m->hw||ticks_hz<48000||ticks_hz>1000000000)return 0;
     m->hw=ma5_hw_open(dll,wav,speakers,m->error,sizeof(m->error));if(!m->hw)return 0;
+    /* The DLL's FM engine starts at sixteen voices (its constructor gets
+       param 1 -> this+0x1804 = 0x10, FUN_10015670), and key-ons for
+       voice >= that count are silently dropped (FUN_10016094). The MA-3
+       reaches its second FM bank through native voices 16..31
+       (0x110..0x16F), so those notes would vanish entirely at the
+       default count. Register 0x38 bit0=1 selects the 32-voice bank
+       (case 0x38 -> FUN_10016198(engine,~v&1): 0 -> 32 voices). */
+    ma5_hw_register(m->hw,0x38,1,0);
     m->ticks_hz=ticks_hz;m->last_tick=m->bus->ticks;m->fractional=m->pending_frames=0;return 1;
 }
 int ma3_set_block(Ma3 *m,unsigned frames)

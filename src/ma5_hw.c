@@ -270,6 +270,7 @@ static unsigned __stdcall worker(void *arg)
         case 15:ram_changed(h,h->arg&0xffff,h->arg>>16);break;
         case 16:h->write_status((unsigned char)h->arg);
             for(i=0;i<h->packet_size;++i)h->write_data(h->packet[i]);break;
+        case 17:h->generate(NULL,NULL,0);break;
         case 13: {
             unsigned address=h->arg&0xfffff,bytes=(h->arg&0x100000)?3:address>=128?2:1;
             h->write_status(3);
@@ -330,6 +331,7 @@ void ma5_hw_fifo(Ma5Hw *h,unsigned selector,const uint8_t *bytes,unsigned length
     h->packet=NULL;h->packet_size=0;
 }
 int ma5_hw_generate(Ma5Hw *h,unsigned frames){return (int)command(h,4,frames);}
+void ma5_hw_pump(Ma5Hw *h){(void)command(h,17,0);}
 void ma5_hw_pause(Ma5Hw *h,int paused){(void)command(h,7,(unsigned)(paused!=0));}
 void ma5_hw_reset(Ma5Hw *h){(void)command(h,6,0);}
 void ma5_hw_parameter(Ma5Hw *h,unsigned address,unsigned value){(void)command(h,9,(address<<8)|(value&255));}

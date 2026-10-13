@@ -76,12 +76,42 @@ void bus_fault_access(Bus *b, int write, uint32_t address, unsigned width, uint3
 {
     fault(b, write ? 'W' : 'R', address, width, value, reason);
 }
+unsigned bus_watch_parse(Bus *b, const char *spec)
+{
+    unsigned count = 0;
+    if (!spec) return 0;
+    while (*spec && count < BUS_MAX_WATCH) {
+        char *stop;
+        unsigned long lo = strtoul(spec, &stop, 0);
+        unsigned long hi;
+        if (stop == spec || *stop != ',') break;
+        spec = stop + 1;
+        hi = strtoul(spec, &stop, 0);
+        if (stop == spec) break;
+        spec = stop;
+        if (hi > lo) { b->watch_lo[count] = (uint32_t)lo; b->watch_hi[count] = (uint32_t)hi; ++count; }
+        while (*spec == ';' || *spec == ',' || *spec == ' ' || *spec == '\t') ++spec;
+    }
+    b->watch_count = count;
+    b->watch_start = count ? b->watch_lo[0] : 0; /* Legacy callers still read these two. */
+    b->watch_end = count ? b->watch_hi[0] : 0;
+    return count;
+}
+static int watch_hit(const Bus *b, uint32_t address)
+{
+    unsigned i;
+    if (address >= b->watch_start && address < b->watch_end) return 1;
+    for (i = 0; i < b->watch_count; ++i)
+        if (address >= b->watch_lo[i] && address < b->watch_hi[i]) return 1;
+    return 0;
+}
 static void watch(Bus *b, char op, uint32_t address, unsigned width, uint32_t value, const Region *r)
 {
-    if (b->access_log && address >= b->watch_start && address < b->watch_end)
-        fprintf(b->access_log, "%llu PC=%08x %c%u %08x value=%08x %s\n",
-            (unsigned long long)b->ticks, b->pc, op, width * 8, address, value,
-            !r ? "unmapped" : r->read ? "device" : r->readonly ? "ROM" : "RAM");
+    if (b->watch_writes_only && op == 'R') return;
+    if (!b->access_log || !watch_hit(b, address)) return;
+    fprintf(b->access_log, "%llu PC=%08x %c%u %08x value=%08x %s\n",
+        (unsigned long long)b->ticks, b->pc, op, width * 8, address, value,
+        !r ? "unmapped" : r->read ? "device" : r->readonly ? "ROM" : "RAM");
 }
 uint32_t bus_read(Bus *b, uint32_t a, unsigned width)
 {
@@ -97,6 +127,18 @@ uint32_t bus_read(Bus *b, uint32_t a, unsigned width)
     }
     if (b->access_log) watch(b, 'R', a, width, value, r);
     return value;
+}
+int bus_peek(Bus *b, uint32_t a, unsigned width, uint32_t *value)
+{
+    Region *r = lookup(b, a, width);
+    if (!r || r->read || !r->data) return 0; /* plain memory only, never a device */
+    {
+        const uint8_t *p = r->data + (a - r->base); /* little-endian host (x86) */
+        if (width == 4) memcpy(value, p, 4);
+        else if (width == 2) { uint16_t half; memcpy(&half, p, 2); *value = half; }
+        else *value = p[0];
+    }
+    return 1;
 }
 void bus_write(Bus *b, uint32_t a, unsigned width, uint32_t value)
 {

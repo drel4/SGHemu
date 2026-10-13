@@ -141,11 +141,31 @@ been captured on all three C100 versions. All DLL calls and playback buffers
 belong to one audio thread. Volume mapping and some chip controls are provisional.
 PCM/ADPCM stream interrupts, refill timing and sample-position reads are now
 translated, but compatibility remains incomplete. The phone filesystem manager
-is read-only (directory inspection, TSV export and NVM backup); custom media and
-Java imports and CPU/DSP navigation tones are not implemented yet.
+supports directory inspection, TSV export, NVM backup and content import on
+C100 XEDK1. **Import content...** accepts sounds, PNG/JPEG/GIF/BMP pictures and
+CLDC 1.0 / MIDP 1.0 JARs. Pictures are fitted to 128 x 128 (first frame only).
+JARs run through the phone's native installer; wait for **Installed**, then close
+the phone dialog. **Java games** reboots into the native MIDlet menu using the
+saved NVM. Other firmware profiles do not yet declare these installer entries.
+The handset's own Java menu is WAP & Games -> Downloads -> Games and more.
+CPU/DSP navigation tones are not implemented yet. See
+[content import details](docs/c100-content-import.md).
 CLI: `--ma5-hw PATH`, optional `--audio-wav FILE` and `--audio-ticks-hz N`.
 The tick rate is not a measured CPU clock. DLL download requires explicit consent;
 no firmware, DLL, voice bank or generated proprietary asset is distributed.
+
+CLI Java examples (use your own game file):
+
+```powershell
+.\build\sghemu.exe models/c100/c100xedk1-bringup.cfg --import GAME.jar --lcd-out build/installed.bmp
+.\build\sghemu.exe models/c100/c100xedk1-bringup.cfg --java-menu --lcd-out build/java-menu.bmp
+.\build\jarinspect.exe GAME.jar
+```
+
+The manifest check is not an API-compatibility guarantee. Games requiring
+MIDP 2.x or APIs absent from the original handset may not run. The JAR manifest
+decoder uses Mark Adler's [puff](third_party/puff/README.md), with its original
+license preserved separately from the project's WTFPL.
 
 ## Layout
 

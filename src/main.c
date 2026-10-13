@@ -2,6 +2,7 @@
 #include "firmware.h"
 #include "nvram.h"
 #include "userfs.h"
+#include "content.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,12 +10,17 @@ int main(int argc, char **argv)
 {
     Machine m = {0};
     NvramStore storage = {0};
+    ContentImport content = {0};
     uint64_t budget = 100000;
     unsigned i;
-    int continuation = 0, result = 0, mmio_trace = 0, until_set = 0;
-    uint32_t until = 0;
+    int continuation = 0, result = 0, mmio_trace = 0, until_set = 0, watch_writes_only = 0, budget_set = 0;
+    uint32_t until = 0, watch_start = 0, watch_end = 0;
+    uint32_t watch_lo[BUS_MAX_WATCH], watch_hi[BUS_MAX_WATCH];
+    unsigned watch_count = 0;
     const char *model;
     const char *lcd_output = NULL;
+    const char *import_path = NULL;
+    int java_menu=0;
     const char *fs_output=NULL;
     const char *nv_input = NULL, *nv_output = NULL;
     const char *state_directory = NULL; /* Default: model-local, firmware-hashed. */
@@ -24,7 +30,7 @@ int main(int argc, char **argv)
     FirmwareMatch *matches = NULL;
     unsigned first_argument = 2;
     FILE *trace = NULL, *access_log = NULL, *log;
-    if (argc < 2) { puts("sghemu MODEL.cfg | --folder PATH [instruction-budget] [--lcd-out FILE.bmp]\nOptions: --continue-unmapped --trace --mmio-trace --until ADDRESS\n         --nv-load FILE.snv --nv-save FILE.snv (diagnostic import/export)\n         --state-dir DIRECTORY --no-persist --sim present|none\n         --ma5-hw M5_EmuHw.dll [--audio-wav FILE.wav]\n         --audio-ticks-hz N (legacy profiles only, not CPU MHz)\n         --fs-list FILE.tsv (directory metadata, not file contents)\nNVM auto-loads/saves beside the model config in state/. Run from repo root; see build/unmapped.log."); return 2; }
+    if (argc < 2) { puts("sghemu MODEL.cfg | --folder PATH [instruction-budget] [--lcd-out FILE.bmp]\nOptions: --continue-unmapped --trace --mmio-trace --until ADDRESS --service\n         --nv-load FILE.snv --nv-save FILE.snv (diagnostic import/export)\n         --state-dir DIRECTORY --no-persist --sim present|none\n         --ma5-hw M5_EmuHw.dll [--audio-wav FILE.wav]\n         --audio-ticks-hz N (legacy profiles only, not CPU MHz)\n         --fs-list FILE.tsv (directory metadata, not file contents)\n         --import FILE (sound/picture or MIDP 1.0 JAR through the guest)\n         --java-menu (boot the native installed-MIDlet menu)\nNVM auto-loads/saves beside the model config in state/. Run from repo root; see build/unmapped.log."); return 2; }
     model = argv[1];
     if (!strcmp(model, "--folder")) {
         unsigned count;
@@ -45,6 +51,9 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--continue-unmapped")) continuation = 1;
         else if (!strcmp(argv[i], "--no-persist")) persistent = 0;
+        else if (!strcmp(argv[i], "--java-menu")) java_menu=1;
+        else if (!strcmp(argv[i], "--import") && i + 1 < (unsigned)argc) import_path = argv[++i];
+        else if (!strcmp(argv[i], "--service")) sgh_service_mode = 1;
         else if (!strcmp(argv[i],"--sim") && i+1<(unsigned)argc) {
             const char *mode=argv[++i];
             if(!strcmp(mode,"present"))sim_override=1;else if(!strcmp(mode,"none"))sim_override=0;
@@ -66,8 +75,12 @@ int main(int argc, char **argv)
         else {
             char *end; budget = strtoull(argv[i], &end, 0);
             if (!budget || *end || argv[i][0] == '-') { if (trace) fclose(trace); return 2; }
+            budget_set = 1;
         }
     }
+    /* The import trigger sits past storage and UI initialization; give a bare
+       --import run enough budget to reach it instead of silently doing nothing. */
+    if (import_path && !budget_set) budget = 20000000;
     log = fopen("build/unmapped.log", "w");
     if (!log) { if (trace) fclose(trace); return 1; }
     if (!machine_load_pair(&m, model, matches ? matches[0].rom[0] : NULL, matches ? matches[0].rom[1] : NULL, log)) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
@@ -75,6 +88,12 @@ int main(int argc, char **argv)
     if (persistent && !nvram_store_open(&storage, &m, state_directory)) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
     storage_ready = 1;
     if (nv_input && !(persistent ? nvram_store_import(&storage, &m, nv_input) : nvram_load(&m, nv_input))) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
+    if (import_path && !storage.active) { fprintf(stderr, "Content import needs the persistent phone directory; boot once so the guest initializes it, then import.\n"); result = 1; goto done; }
+    if (import_path && !content_import_open(&content, &m, import_path)) { fprintf(stderr, "%s\n", content.error); result = 1; goto done; }
+    if(import_path&&!budget_set&&content.type==10)budget=900000000;
+    if(java_menu&&import_path){fprintf(stderr,"Use --java-menu or --import, not both.\n");result=1;goto done;}
+    if(java_menu&&!content_java_menu(&content,&m)){fprintf(stderr,"%s\n",content.error);result=1;goto done;}
+    if(java_menu&&!budget_set)budget=600000000;
     if(audio_wav&&!hardware_dll){fprintf(stderr,"--audio-wav requires --ma5-hw\n");result=1;goto done;}
     if(hardware_dll) {
         if(!ma3_enable(&m.ma3,hardware_dll,audio_wav,!audio_wav,m.clock.attached?1000000000:audio_ticks_hz)){fprintf(stderr,"MA-3 hardware: %s\n",m.ma3.error);result=1;goto done;}
@@ -93,6 +112,25 @@ int main(int argc, char **argv)
         access_log = fopen("build/mmio-trace.log", "w");
         if (!access_log) { result = 1; goto done; }
         m.bus.access_log = access_log; m.bus.watch_start = 0x00040000; m.bus.watch_end = 0x00042000;
+        watch_start = 0x00040000; watch_end = 0x00042000;
+    } else {
+        /* MA3_ACCESS_WATCH=start,end[;start,end...] arms the same watch over
+           arbitrary guest RAM, writes only, so a RAM field can be attributed to
+           the guest PC that wrote it. Same instrument src/gui.c exposes to the
+           frontend. */
+        const char *range = getenv("MA3_ACCESS_WATCH");
+        if (range && *range) {
+            access_log = fopen("build/ram-watch.log", "w");
+            if (!access_log) { result = 1; goto done; }
+            if (!bus_watch_parse(&m.bus, range)) { fclose(access_log); access_log = NULL; }
+            else {
+                unsigned r;
+                watch_start = m.bus.watch_start; watch_end = m.bus.watch_end; watch_writes_only = 1;
+                watch_count = m.bus.watch_count;
+                for (r = 0; r < watch_count; ++r) { watch_lo[r] = m.bus.watch_lo[r]; watch_hi[r] = m.bus.watch_hi[r]; }
+                m.bus.access_log = access_log; m.bus.watch_writes_only = 1;
+            }
+        }
     }
     while (m.cpu.instructions < budget) {
         int provision = nvram_store_step(&storage, &m);
@@ -107,12 +145,29 @@ int main(int argc, char **argv)
             storage.defaults_boot = initialize_defaults;
             if(sim_override>=0)m.sim.present=sim_override;
             if(hardware_dll&&!ma3_enable(&m.ma3,hardware_dll,audio_wav,!audio_wav,m.clock.attached?1000000000:audio_ticks_hz)){fprintf(stderr,"MA-3 hardware: %s\n",m.ma3.error);result=1;break;}
-            if (access_log) { m.bus.access_log = access_log; m.bus.watch_start = 0x40000; m.bus.watch_end = 0x42000; }
+            if (access_log) {
+                unsigned r;
+                m.bus.access_log = access_log;
+                for (r = 0; r < watch_count; ++r) { m.bus.watch_lo[r] = watch_lo[r]; m.bus.watch_hi[r] = watch_hi[r]; }
+                m.bus.watch_count = watch_count;
+                m.bus.watch_start = watch_start; m.bus.watch_end = watch_end;
+                m.bus.watch_writes_only = watch_writes_only;
+            }
             continue;
         }
         if (until_set && m.cpu.r[15] == until) { printf("Address breakpoint reached: %08x\n", until); break; }
+        if (content.active && !content.done && !content.failed) {
+            int imported = content_import_step(&content, &m);
+            if (!imported) { fprintf(stderr, "%s\n", content.error); result = 1; break; }
+            if (imported == 2 && content.type==10) puts(content.size ? "Java installer started; wait for the handset installation result." : "Native Java menu started.");
+            if (imported == 2 && content.type!=10) printf("Content import: guest accepted \"%s\" (%u bytes); the flash task writes it as the boot continues.\n", content.name, content.size);
+        }
         if (trace) fprintf(trace, "%llu %08x CPSR=%08x R0=%08x R1=%08x SP=%08x\n", (unsigned long long)m.cpu.instructions, m.cpu.r[15], m.cpu.cpsr, m.cpu.r[0], m.cpu.r[1], m.cpu.r[13]);
         if (!machine_step(&m, continuation)) { result = 1; break; }
+    }
+    if (content.active && !content.done && !content.failed) {
+        fprintf(stderr, "Content import: the guest import trigger was not reached; give the boot enough instructions to pass storage initialization.\n");
+        result = 1;
     }
     printf("instructions=%llu scheduler_ticks=%llu PC=%08x CPSR=%08x unmapped/ROM-faults=%llu\n",
         (unsigned long long)m.cpu.instructions, (unsigned long long)m.cpu.cycles, m.cpu.r[15], m.cpu.cpsr, (unsigned long long)m.bus.faults);
@@ -149,6 +204,6 @@ int main(int argc, char **argv)
     if (m.bus.fault) puts("Stopped on unknown hardware; see build/unmapped.log. This is not a successful phone boot.");
 done:
     if (storage_ready && !nvram_store_flush(&storage, &m)) { fprintf(stderr, "%s\n", m.error); result = 1; }
-    nvram_store_release(&storage);
+    nvram_store_release(&storage); content_import_release(&content);
     if (trace) fclose(trace); machine_destroy(&m); if (access_log) fclose(access_log); fclose(log); free(matches); return result;
 }

@@ -10,8 +10,13 @@
 #include "keypad.h"
 #include "sim.h"
 #include "ma3.h"
+#include "sds_uart.h"
+#include "sds_dma.h"
 #define SGH_MAX_IDENTITIES 16
 #define SGH_MAX_KEYS 22
+/* Set before machine_load to open the factory/service path: attaches the
+   loopback cable and the general DMA controller it drives. */
+extern int sgh_service_mode;
 typedef struct { Bus *bus; uint32_t address; uint16_t value; } Identity16;
 typedef struct { Bus *bus; uint32_t address, value; } Register32;
 typedef struct { uint32_t base; size_t size; char path[1024]; } RomImage;
@@ -50,6 +55,10 @@ typedef struct {
     uint32_t nvram_base, nvram_size;
     uint8_t *nvram_data; /* Configured writable flash tail, not an invented filesystem. */
     uint32_t nv_trigger, nv_format, nv_marker; /* Verified guest factory-service entries. */
+    /* Verified guest entries for user-content import: a post-initialization PC
+       and the allocator, name search and file writer the guest itself runs. */
+    uint32_t import_trigger, import_alloc, import_search, import_write;
+    uint32_t java_ready, java_globals, java_set_jar, java_send_ui, java_message, java_min_instructions;
     Lcd lcd;
     Intc intc;
     Pmic pmic;
@@ -57,6 +66,8 @@ typedef struct {
     Keypad keypad;
     Sim sim;
     Ma3 ma3;
+    SdsUart sds_uart;
+    SdsDma sds_dma;
     PhoneClock clock;
     int periodic_time;
     uint32_t fs_header, fs_table, fs_capacity, fs_stride;

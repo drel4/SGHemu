@@ -9,6 +9,8 @@ unsigned ma5_hw_read(Ma5Hw *hw, int data);
 void ma5_hw_write(Ma5Hw *hw, int data, unsigned value);
 void ma5_hw_fifo(Ma5Hw *hw,unsigned selector,const uint8_t *bytes,unsigned length);
 int ma5_hw_generate(Ma5Hw *hw, unsigned frames);
+/* Execute already-due FIFO commands without rendering or advancing time. */
+void ma5_hw_pump(Ma5Hw *hw);
 void ma5_hw_pause(Ma5Hw *hw, int paused);
 void ma5_hw_reset(Ma5Hw *hw);
 void ma5_hw_parameter(Ma5Hw *hw,unsigned address,unsigned value);

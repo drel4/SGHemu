@@ -4,6 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+
+/* A service session attaches the bench loopback cable and the general DMA
+   controller the firmware's factory path needs. It is off for every ordinary
+   boot so the handoff state is reproduced unchanged. */
+int sgh_service_mode = 0;
 static char *trim(char *s)
 {
     char *end;
@@ -219,6 +224,22 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             if (!next || m->nv_trigger || !base || (base & 1)) { valid = 0; break; } *next++ = 0;
             if (!number(comma, &size) || !size || (size & 1) || !number(next, &marker) || !marker || (marker & 1)) { valid = 0; break; }
             m->nv_trigger = base; m->nv_format = size; m->nv_marker = marker;
+        } else if (!strcmp(key, "import")) {
+            char *second = strchr(comma, ','), *third; uint32_t alloc, search, write;
+            if (!second || m->import_trigger || !base || (base & 1)) { valid = 0; break; } *second++ = 0;
+            third = strchr(second, ','); if (!third) { valid = 0; break; } *third++ = 0;
+            if (!number(comma, &alloc) || !alloc || (alloc & 1) || !number(second, &search) || !search || (search & 1) ||
+                !number(third, &write) || !write || (write & 1)) { valid = 0; break; }
+            m->import_trigger = base; m->import_alloc = alloc; m->import_search = search; m->import_write = write;
+        } else if (!strcmp(key, "java_import")) {
+            uint32_t fields[5];unsigned j;char *part=comma;
+            if(m->java_ready||!base||(base&1)){valid=0;break;}
+            for(j=0;j<5;++j){char *next=strchr(part,',');
+                if((j<4&&!next)||(j==4&&next)){valid=0;break;}if(next)*next++=0;
+                if(!number(part,&fields[j])||!fields[j]){valid=0;break;}part=next;}
+            if(!valid||(fields[0]&3)||(fields[1]&1)||(fields[2]&1)){valid=0;break;}
+            m->java_ready=base;m->java_globals=fields[0];m->java_set_jar=fields[1];
+            m->java_send_ui=fields[2];m->java_message=fields[3];m->java_min_instructions=fields[4];
         } else if (!strcmp(key, "nvram")) {
             if (m->nvram_size || !number(comma, &size) || !size || (base & 1) || (size & 1)) { valid = 0; break; }
             m->nvram_base = base; m->nvram_size = size;
@@ -237,6 +258,29 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             if(!m->clock.attached||!next||index==8||base>65535){valid=0;break;}*next++=0;
             if(!number(comma,&size)||!number(next,&dsp)||size<1000000||size>100000000||dsp<1000000||dsp>100000000){valid=0;break;}
             m->clock.encoding[index]=(uint16_t)base;m->clock.arm_rates[index]=size;m->clock.dsp_rates[index]=dsp;++m->clock.count;
+        } else if (!strcmp(key, "sds_uart")) {
+            uint32_t cable;
+            if (m->sds_uart.attached || !m->intc.attached || !number(comma, &cable) || cable > 1 ||
+                !sds_uart_attach(&m->sds_uart, &m->bus, &m->intc, base, (int)cable)) { valid = 0; break; }
+            /* The model always carries the port; the bench cable only exists in a
+               service session, so a normal boot never loops a byte back. */
+            m->sds_uart.cable = sgh_service_mode ? (int)cable : 0;
+        } else if (!strcmp(key, "sds_dma")) {
+            uint32_t channels, start_delay = 0, byte_time = 0;
+            char *next = strchr(comma, ',');
+            char *more = next ? strchr(next + 1, ',') : 0;
+            if (more) *more++ = 0;
+            if (next) *next++ = 0;
+            /* The general DMA controller shares its register block with the SIM
+               device's channel and only matters for the service loopback, so it
+               is left unmapped outside a service session; that keeps a normal
+               boot byte-for-byte unchanged. */
+            if (!sgh_service_mode) continue;
+            if (m->sds_dma.attached || !number(comma, &channels) || !channels ||
+                channels > SDS_DMA_MAX_CHANNELS || (next && !number(next, &start_delay)) ||
+                (more && !number(more, &byte_time)) ||
+                !sds_dma_attach(&m->sds_dma, &m->bus, m->sds_uart.attached ? &m->sds_uart : 0,
+                    base, channels, start_delay, byte_time)) { valid = 0; break; }
         } else if (!strcmp(key, "periodic_irq")||!strcmp(key,"periodic_time_irq")) {
             m->periodic_time=!strcmp(key,"periodic_time_irq");
             if (!m->intc.attached || base > 31 || !number(comma, &size) || !size) { valid = 0; break; }
@@ -374,6 +418,7 @@ int machine_step(Machine *m, int continuation)
     uint64_t previous_clocks=m->cpu.clock_cycles;
     if (!m->loaded || m->cpu.halted) return 0;
     sim_advance(&m->sim,m->cpu.cycles);
+    sds_dma_advance(&m->sds_dma,m->cpu.cycles);
     ma3_advance(&m->ma3,m->clock.attached?m->clock.nanoseconds:m->cpu.cycles);
     if (*m->ma3.error) { m->cpu.halted=1; m->cpu.error=m->ma3.error; return 0; }
     intc_advance_time(&m->intc, &m->cpu,m->periodic_time?m->clock.nanoseconds:m->cpu.cycles);
