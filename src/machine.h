@@ -12,6 +12,9 @@
 #include "ma3.h"
 #include "sds_uart.h"
 #include "sds_dma.h"
+#include "rtc.h"
+#include "battery.h"
+#include "phone_io.h"
 #define SGH_MAX_IDENTITIES 16
 #define SGH_MAX_KEYS 22
 /* Set before machine_load to open the factory/service path: attaches the
@@ -69,6 +72,9 @@ typedef struct {
     SdsUart sds_uart;
     SdsDma sds_dma;
     PhoneClock clock;
+    PhoneRtc rtc;
+    Battery battery;
+    PhoneIo phone_io;
     int periodic_time;
     uint32_t fs_header, fs_table, fs_capacity, fs_stride;
     uint32_t irq_gate_address, irq_gate_mask;

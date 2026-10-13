@@ -140,14 +140,27 @@ int main(void)
         f=fopen("build/content-picture.bmp","wb");CHECK(f!=NULL);
         CHECK(fwrite(bmp,1,sizeof(bmp),f)==sizeof(bmp));CHECK(!fclose(f));
         CHECK(content_import_open(&image,&m,"build/content-picture.bmp"));
-        CHECK(image.type==7&&image.size==13);
-        CHECK(image.file[0]==2&&image.file[1]==1&&image.file[2]==0&&image.file[3]==1&&image.file[5]==4);
-        CHECK(image.file[9]==0&&image.file[10]==0xf8&&image.file[11]==0xe0&&image.file[12]==7);
+        CHECK(image.type==7&&image.size==16);
+        CHECK(image.file[0]==2&&image.file[1]==1&&image.file[2]==0&&image.file[3]==1&&image.file[5]==6);
+        CHECK(image.file[9]==0&&image.file[10]==0);
+        CHECK(image.file[11]==0&&image.file[12]==0xf8&&image.file[13]==0xe0&&image.file[14]==7);
+        CHECK(image.file[15]==0);
         content_import_release(&image);
         f=fopen("build/content-bad.png","wb");CHECK(f!=NULL);
         CHECK(fwrite(bytes,1,sizeof(bytes),f)==sizeof(bytes));CHECK(!fclose(f));
         CHECK(!content_import_open(&image,&m,"build/content-bad.png"));
         CHECK(strstr(image.error,"decode this picture")!=NULL);content_import_release(&image);
+    }
+    /* Odd-length downloads must retain their final byte across the firmware's
+       halfword-only storage reader; padding must not alter any input byte. */
+    {
+        static const uint8_t odd[]={ 'M','M','M','D',0,0,0,3,0x12,0x34,0xb6 };
+        ContentImport sound={0};
+        f=fopen("build/content-odd.mmf","wb");CHECK(f!=NULL);
+        CHECK(fwrite(odd,1,sizeof(odd),f)==sizeof(odd));CHECK(!fclose(f));
+        CHECK(content_import_open(&sound,&m,"build/content-odd.mmf"));
+        CHECK(sound.size==12&&!memcmp(sound.file,odd,sizeof(odd))&&sound.file[11]==0);
+        content_import_release(&sound);
     }
     printf("Content import: %u checks passed.\n", checks);
     return 0;

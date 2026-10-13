@@ -7,6 +7,7 @@ static void reset_parameters(Ma3 *m)
     memset(m->parameter_ram,0,sizeof(m->parameter_ram));
     memset(m->parameter_ram+0x90,0x60,16);memset(m->parameter_ram+0xa0,0x3c,16);
     memset(m->parameter_ram+0x14a,0x40,8);
+    m->led_token=m->led_on=m->led_color=0;m->led_tick=0;
     m->packet_phase=m->address_bytes=m->length_bytes=m->response_mask=0;
     m->packet_address=m->packet_length=0;
     m->delayed_length=m->delayed_phase=m->delayed_address=m->delayed_count=m->delayed_count_bytes=0;
@@ -15,6 +16,9 @@ static unsigned translate_address(unsigned address)
 {
     if(address<0x90)return address;
     if(address<0x140)return address+0x30;
+    /* Native 1DE is a stored no-op. Use it as an exclusively owned LED marker
+       so the DLL sequences the toggle at its original delta, not FIFO receipt. */
+    if(address==0x146)return 0x1de;
     /* Native bits 2/3 correspond to MA-3 SoftInt0/1. Translate ISR separately.
        Keep payloads in the delayed FIFO, not immediate host callbacks. */
     if(address>=0x15a&&address<=0x15d)return address+0x7c;
@@ -41,11 +45,24 @@ static unsigned guest_irq(unsigned low,unsigned high)
 {
     return ((low&0x0c)>>2)|(high&0x0c)|((low&0x30)<<1)|(low&0x80);
 }
+static unsigned led_marker(Ma3 *m,unsigned value)
+{
+    m->led_serial=(m->led_serial+1)&63;
+    return (value&128)|(m->led_serial<<1)|(value&1);
+}
+static void led_update(Ma3 *m)
+{
+    unsigned token=ma5_hw_led_token(m->hw);static const unsigned colors[]={2,4,1,3};
+    if(token==m->led_token)return;
+    m->led_token=token;m->led_on=token&1;m->led_tick=m->bus->ticks;++m->led_events;
+    if(m->led_on){unsigned x=m->led_rng?m->led_rng:0x6d2b79f5u;
+        x^=x<<13;x^=x>>17;x^=x<<5;m->led_rng=x;m->led_color=colors[x&3];}
+}
 static void immediate_parameter(Ma3 *m,unsigned address,unsigned value)
 {
     unsigned mapped=translate_address(address);
     if(!m->hw)return;
-    if(mapped!=UINT32_MAX){ma5_hw_parameter(m->hw,mapped,translate_value(address,value));++m->translated;}
+    if(mapped!=UINT32_MAX){ma5_hw_parameter(m->hw,mapped,address==0x146?led_marker(m,value):translate_value(address,value));++m->translated;}
     else if(address==0x161){
         ma5_hw_register(m->hw,0x26,value&3,m->bank);
         /* SeekControl starts, polls the FIFO sixteen times, then stops/clears.
@@ -112,7 +129,8 @@ static void delayed_packet(Ma3 *m,unsigned value)
         if(mapped==0x1df)packet[length++]=128;
         else for(i=m->address_end;i<m->delayed_length;++i)
             packet[length++]=(uint8_t)(m->address_count==3?m->delayed[i]:
-                translate_value(m->delayed_address+i-m->address_end,m->delayed[i]));
+                (m->delayed_address+i-m->address_end==0x146?led_marker(m,m->delayed[i]):
+                 translate_value(m->delayed_address+i-m->address_end,m->delayed[i])));
         ma5_hw_fifo(m->hw,1,packet,length);
         ++m->translated;
     }
@@ -290,6 +308,7 @@ void ma3_advance(Ma3 *m,uint64_t ticks)
         while(m->pending_frames>=block){unsigned count=block;
             if(!ma5_hw_generate(m->hw,count)){strcpy(m->error,"Hardware PCM generation/output failed");return;}m->pending_frames-=count;}
     }
+    led_update(m);
     if(ma5_hw_irq(m->hw)){m->intc->pending|=m->irq_mask;++m->irq_events;}
 }
 void ma3_destroy(Ma3 *m)

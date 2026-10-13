@@ -376,8 +376,10 @@ that the opening is no longer skipped; it is not a physical-handset tempo test.
 
 CPU/DSP navigation tones are a separate path: `kid_keybeep` (`0x011443FC`)
 calls `audioStartTone` (`0x011D3DBA`) for ordinary tones; `TGSetToneD1`
-(`0x012AF30C`) programs tone state. That path is not implemented yet and is
-not replaced with host keypress beeps.
+(`0x012AF30C`) programs tone state. This path is now rendered separately
+from Yamaha using the model-configured DSP tone table; see
+[CPU tones and service LED](c100-phone-output.md). It is not replaced with
+host keypress beeps.
 
 ### ADPCM stream-cache correction (v0.2.2 experimental build)
 
@@ -876,3 +878,33 @@ readback with `MA3_CURSOR_TRACE=1`, a `MA3_MASK_FIFO_EMPTY` status diagnostic
 (negative result: it changes every status byte but not one AUDIO marker),
 `MA5HW_STATE`'s per-voice decoder dump, and `MA3_SNDWATCH`'s guest-state
 transitions (see the guest-state watch section above).
+
+### ADPCM interpolation seam correction (2026-10-14)
+
+The former dirty-ring lookahead workaround held the last decoded sample until
+wrap. In Arabesque's opening stream, the ring wraps every ~248.25 ms and the
+held interval lasts six 48-kHz output samples. The second wrap (~496 ms into the
+stream) produces a particularly noticeable step. This is an adapter cache seam,
+not six missing elapsed samples, and must not be hidden with global smoothing.
+
+The adapter now computes the first new low nibble using the final old-buffer
+predictor/step, installs it as interpolation lookahead, and stages its resulting
+history. The native old decode index/history remain intact until actual wrap;
+then index 1 plus the staged history are committed. This prevents decoding the
+opening twice and prevents re-decoding the old tail with new history. Nonzero
+static loop offsets retain the earlier fallback; the C100 stream ring uses zero.
+The single-nibble arithmetic matches the pinned DLL decoder at `1001BCE4`.
+
+A firmware Arabesque A/B changes only six samples per opening-ring seam, with
+no shifted output timeline. At the prominent 496-ms seam, the largest PCM delta
+falls from 5,347 to 3,154 and the maximum locally aligned Yamaha-reference
+residual from 5,893 to 2,417. Other source-waveform transitions remain intact.
+The ~64-ms pause at the end of the opening is also present in the SMW5 reference
+(~71 ms there); it is not evidence of a lost stream refill.
+
+CPU tones now mix into Yamaha's existing output blocks/queue when Yamaha is
+active. Bumer's song output after CPU tones settle is bit-exact across this
+routing change. A 26.6-second idle-host mixed playback had zero output underruns;
+a run competing with a full build recorded one. Traffic tracing remains an
+optional performance cost. Listener confirmation of the remaining audible clicks
+is still needed; these measurements do not prove every MMF is gap-free.

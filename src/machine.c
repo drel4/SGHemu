@@ -115,7 +115,7 @@ void machine_destroy(Machine *m)
 {
     if (m->audio.ops) m->audio.ops->stop(&m->audio);
     ma3_destroy(&m->ma3);
-    bus_destroy(&m->bus); free(m->pixels); free(m->unplaced_rom); memset(m, 0, sizeof(*m));
+    phone_io_close(&m->phone_io); bus_destroy(&m->bus); free(m->pixels); free(m->unplaced_rom); memset(m, 0, sizeof(*m));
 }
 int machine_load(Machine *m, const char *path, const char *rom_override, FILE *log)
 {
@@ -143,6 +143,16 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
         if (!*key || *key == '#') continue;
         value = strchr(key, '='); if (!value) { valid = 0; break; }
         *value++ = 0; key = trim(key); value = trim(value);
+        if(!strcmp(key,"phone_io")){
+            unsigned count=0;char *part=value;uint32_t fields[7];
+            while(part&&count<7){char *next=strchr(part,',');if(next)*next++=0;
+                if(!number(trim(part),&fields[count++])){valid=0;break;}part=next;}
+            if(!valid||count!=7||part){valid=0;break;}
+            m->phone_io.tone_entry=fields[0];m->phone_io.tone_stop=fields[1];
+            m->phone_io.tone_table=fields[2];m->phone_io.gpio_entry=fields[3];
+            m->phone_io.led_pins[0]=fields[4];m->phone_io.led_pins[1]=fields[5];m->phone_io.led_pins[2]=fields[6];
+            m->phone_io.configured=1;continue;
+        }
         if (!strcmp(key, "name")) { if (strlen(value) >= sizeof(m->name)) { valid = 0; break; } strcpy(m->name, value); continue; }
         if (!strcmp(key, "reset")) { if (!number(value, &m->reset)) { valid = 0; break; } reset_set = 1; continue; }
         if (!strcmp(key, "audio")) { if (strcmp(value, "silent")) { valid = 0; break; } continue; }
@@ -249,6 +259,18 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             if(!last){valid=0;break;}*last++=0;
             if(!base||!number(comma,&size)||!number(next,&capacity)||!number(last,&stride)||!capacity||capacity>100||stride!=28){valid=0;break;}
             m->fs_header=base;m->fs_table=size;m->fs_capacity=capacity;m->fs_stride=stride;
+        } else if (!strcmp(key,"battery_guest")) {
+            uint32_t fields[5];unsigned j;char *part=comma;
+            if(m->battery.enabled||!base||(base&1)){valid=0;break;}
+            for(j=0;j<5;++j){char *next=strchr(part,',');
+                if((j<4&&!next)||(j==4&&next)){valid=0;break;}if(next)*next++=0;
+                if(!number(part,&fields[j])||!fields[j]){valid=0;break;}part=next;}
+            if(!valid||(fields[0]&1)||(fields[1]&1)||(fields[2]&1)||(fields[3]&1)){valid=0;break;}
+            m->battery.ready=base;m->battery.alloc=fields[0];m->battery.report=fields[1];
+            m->battery.detect=fields[2];m->battery.gpio=fields[3];m->battery.pin=fields[4];
+            m->battery.enabled=1;m->battery.percent=100;m->battery.level_pending=1;
+        } else if (!strcmp(key,"rtc")) {
+            if(!number(comma,&size)||!rtc_attach(&m->rtc,&m->bus,base,size,&m->clock.nanoseconds)){valid=0;break;}
         } else if (!strcmp(key,"clock")) {
             if(m->clock.attached||base&1||!number(comma,&size)||size<1000000||size>100000000){valid=0;break;}
             m->clock.bus=&m->bus;m->clock.base=base;m->clock.reference_hz=m->clock.arm_hz=m->clock.dsp_hz=size;
@@ -417,6 +439,8 @@ int machine_step(Machine *m, int continuation)
     int hle = 0;
     uint64_t previous_clocks=m->cpu.clock_cycles;
     if (!m->loaded || m->cpu.halted) return 0;
+    phone_io_advance(&m->phone_io,m->clock.nanoseconds);
+    phone_io_observe(&m->phone_io,&m->cpu);
     sim_advance(&m->sim,m->cpu.cycles);
     sds_dma_advance(&m->sds_dma,m->cpu.cycles);
     ma3_advance(&m->ma3,m->clock.attached?m->clock.nanoseconds:m->cpu.cycles);
@@ -430,7 +454,7 @@ int machine_step(Machine *m, int continuation)
     /* Exceptions take precedence over an atomic HLE call, just as over an
        instruction fetch. Never return from the service instead of entering IRQ. */
     if (!((m->cpu.fiq && !(m->cpu.cpsr & 0x40u)) || (m->cpu.irq && !(m->cpu.cpsr & 0x80u))))
-        hle = irom_step(&m->irom, &m->cpu);
+        {hle=battery_gpio(&m->battery,&m->cpu);if(!hle)hle=irom_step(&m->irom,&m->cpu);}
     if (hle < 0 || (!hle && !arm7_step(&m->cpu))) return 0;
     if(hle&&m->cpu.clock_cycles==previous_clocks)++m->cpu.clock_cycles; /* Atomic HLE timing remains provisional. */
     if(m->clock.attached)clock_advance(&m->clock,m->cpu.clock_cycles);

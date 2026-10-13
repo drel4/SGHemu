@@ -1,4 +1,5 @@
 #include "ma5_hw.h"
+#include "adpcm.h"
 #include "file.h"
 #include <windows.h>
 #include <mmsystem.h>
@@ -28,9 +29,11 @@ struct Ma5Hw {
     int16_t stage[960]; unsigned fill; /* short blocks collect here until a full 480-frame buffer is ready */
     FILE *wav; char path[1024], wav_path[1024], error[256];
     int speakers, initialized, op, paused, timer_period; unsigned arg, result;
-    volatile LONG irq, callbacks;
+    volatile LONG irq, callbacks,led_token;
     Ma5HwStats stats;
-    unsigned adpcm_dirty[32];
+    unsigned adpcm_dirty[32],adpcm_lookahead[32];
+    uint32_t adpcm_next_step[32];int32_t adpcm_next_predictor[32];
+    Ma5PcmMixer mixer;void *mixer_context;
     const uint8_t *packet;unsigned packet_size;
 };
 static volatile LONG occupied;
@@ -72,7 +75,7 @@ static void ram_changed(Ma5Hw *h,unsigned address,unsigned length)
         /* Only writes overlapping already decoded input make the cache stale.
            Decoder 1001BCE4: next index +10, step +14, predictor +18 (channel+4).
            Leave predictor/step intact: a stream is continuous across refills. */
-        if(start<(uintptr_t)source+(count+1)/2&&start+length>source)h->adpcm_dirty[voice]=1;
+        if(start<(uintptr_t)source+(count+1)/2&&start+length>source){h->adpcm_dirty[voice]=1;h->adpcm_lookahead[voice]=0;}
     }
 }
 static int synthesize(Ma5Hw *h,int16_t *left,int16_t *right,unsigned frames)
@@ -83,26 +86,37 @@ static int synthesize(Ma5Hw *h,int16_t *left,int16_t *right,unsigned frames)
             uintptr_t channel=pcm_channel(h,voice);uint32_t phase,step,end,loop,format,active;
             uint64_t remaining,n,last;
             if(!channel||!native_u32(channel+0x8028,&format)||!native_u32(channel+4,&active))return 0;
-            if(((format>>8)&3)||!(active&255)){h->adpcm_dirty[voice]=0;continue;}
+            if(((format>>8)&3)||!(active&255)){h->adpcm_dirty[voice]=h->adpcm_lookahead[voice]=0;continue;}
             if(!channel||!native_u32(channel+0x808c,&phase)||!native_u32(channel+0x80b8,&step)||
                !native_u32(channel+0x8040,&end)||!native_u32(channel+0x803c,&loop))return 0;
-            if(loop>=end||!step){h->adpcm_dirty[voice]=0;continue;}
+            if(loop>=end||!step){h->adpcm_dirty[voice]=h->adpcm_lookahead[voice]=0;continue;}
             before[voice]=phase;
             remaining=(uint64_t)end*65536;
             last=(uint64_t)(end-1)*65536;
             if(phase<last)remaining=last;
             else {
                 uint32_t decoded,tail,pair;unsigned shift=(loop&1)*16;
-                /* MA-5 interpolates the final sample against cached loop[0].
-                   That cache still contains the previous lap's opening. Hold
-                   the decoded tail for this fractional boundary sample instead
-                   of mixing in stale audio. After wrap, the existing refresh
-                   decodes the new opening with uninterrupted ADPCM history. */
+                /* Interpolate the final old sample against the first NEW
+                   sample, not a held tail or stale previous-lap cache value.
+                   Preview one nibble using the ending history. Keep the native
+                   decode index/history intact until the cursor has wrapped,
+                   otherwise it would re-decode the old tail with new history. */
                 if(end>0x4000||!native_u32(channel+0x14,&decoded))return 0;
                 if(decoded>=end) {
-                    if(!native_u32(channel+0x20+((end-1)&~1u)*2,&tail)||
-                       !native_u32(channel+0x20+(loop&~1u)*2,&pair))return 0;
-                    tail=(tail>>(((end-1)&1)*16))&0xffff;
+                    if(!native_u32(channel+0x20+(loop&~1u)*2,&pair))return 0;
+                    if(!loop){uint32_t source,byte,decoder_step,predictor;
+                        int32_t sample;
+                        if(!native_u32(channel+0x10,&source)||!native_u32(source,&byte)||
+                           !native_u32(channel+0x18,&decoder_step)||!native_u32(channel+0x1c,&predictor))return 0;
+                        sample=sgh_adpcm_next(byte&15,&decoder_step,(int32_t)predictor);
+                        tail=(uint16_t)sample;h->adpcm_next_step[voice]=decoder_step;
+                        h->adpcm_next_predictor[voice]=sample;h->adpcm_lookahead[voice]=1;
+                    } else {
+                        /* Nonzero static-sample loop offsets retain the prior
+                           fallback; continuous C100 streams use loop zero. */
+                        if(!native_u32(channel+0x20+((end-1)&~1u)*2,&tail))return 0;
+                        tail=(tail>>(((end-1)&1)*16))&0xffff;
+                    }
                     pair=(pair&~(0xffffu<<shift))|(tail<<shift);
                     if(!native_store(channel+0x20+(loop&~1u)*2,pair))return 0;
                 }
@@ -114,7 +128,11 @@ static int synthesize(Ma5Hw *h,int16_t *left,int16_t *right,unsigned frames)
             uintptr_t channel=pcm_channel(h,voice);uint32_t phase;
             if(!channel||!native_u32(channel+0x808c,&phase))return 0;
             if(phase<before[voice]) {
-                if(!native_store(channel+0x14,0))return 0;
+                if(h->adpcm_lookahead[voice]){
+                    if(!native_store(channel+0x14,1)||!native_store(channel+0x18,h->adpcm_next_step[voice])||
+                       !native_store(channel+0x1c,(uint32_t)h->adpcm_next_predictor[voice]))return 0;
+                    h->adpcm_lookahead[voice]=0;
+                } else if(!native_store(channel+0x14,0))return 0;
                 ++h->stats.adpcm_refreshes;
                 h->adpcm_dirty[voice]=0;
             }
@@ -162,6 +180,7 @@ static int generate(Ma5Hw *h,unsigned frames)
     left[0]=left[frames+1]=12345;right[0]=right[frames+1]=12345;
     if(!synthesize(h,left+1,right+1,frames))return 0;
     if(left[0]!=12345||left[frames+1]!=12345||right[0]!=12345||right[frames+1]!=12345)return 0;
+    if(h->mixer)h->mixer(h->mixer_context,left+1,right+1,frames);
     /* The DLL runs in short steps so its sequencer, IRQs and PCM cursor stay
        close to emulated time; the sound card still receives 10 ms buffers. */
     for(i=0;i<frames;++i) {
@@ -229,7 +248,7 @@ static unsigned __stdcall worker(void *arg)
         case 3:h->write_data((unsigned char)h->arg);break;
         case 4:if(!generate(h,h->arg)){h->stats.failed=1;h->result=0;}break;
         case 5:goto cleanup;
-        case 6:h->term();h->initialized=0;h->irq=0;h->fill=0;memset(h->adpcm_dirty,0,sizeof(h->adpcm_dirty));
+        case 6:h->term();h->initialized=0;h->irq=0;h->fill=0;memset(h->adpcm_dirty,0,sizeof(h->adpcm_dirty));memset(h->adpcm_lookahead,0,sizeof(h->adpcm_lookahead));
             if(h->init(48000,0,irq_callback)!=0x46){h->stats.failed=1;h->result=0;}else h->initialized=1;break;
         case 7:if(h->wave){if(h->arg)waveOutPause(h->wave);else waveOutRestart(h->wave);}h->paused=(int)h->arg;break;
         case 8:
@@ -279,6 +298,10 @@ static unsigned __stdcall worker(void *arg)
             if(!(h->read_status()&0x40)){h->stats.failed=1;h->result=0;break;}
             h->write_status(0x41);h->result=h->read_data();break;
         }
+        }
+        if(h->op==4||h->op==17||h->op==6||(h->op==9&&(h->arg>>8)==0x1de)){
+            uint32_t token;if(native_u32((uintptr_t)h->dll+0x101780+0x6260+0x1de,&token))
+                h->led_token=(LONG)(token&127);
         }
         SetEvent(h->done);
     }
@@ -331,6 +354,8 @@ void ma5_hw_fifo(Ma5Hw *h,unsigned selector,const uint8_t *bytes,unsigned length
     h->packet=NULL;h->packet_size=0;
 }
 int ma5_hw_generate(Ma5Hw *h,unsigned frames){return (int)command(h,4,frames);}
+void ma5_hw_set_mixer(Ma5Hw *h,Ma5PcmMixer mixer,void *context)
+{if(h){h->mixer=mixer;h->mixer_context=context;}}
 void ma5_hw_pump(Ma5Hw *h){(void)command(h,17,0);}
 void ma5_hw_pause(Ma5Hw *h,int paused){(void)command(h,7,(unsigned)(paused!=0));}
 void ma5_hw_reset(Ma5Hw *h){(void)command(h,6,0);}
@@ -340,6 +365,7 @@ unsigned ma5_hw_pcm_cursor(Ma5Hw *h,unsigned voice){return command(h,14,voice);}
 void ma5_hw_ram_changed(Ma5Hw *h,unsigned address,unsigned length){(void)command(h,15,(length<<16)|(address&0xffff));}
 void ma5_hw_register(Ma5Hw *h,unsigned reg,unsigned value,unsigned bank){(void)command(h,10,(bank<<16)|(reg<<8)|(value&255));}
 /* Called once per emulated instruction: a plain read first, the interlocked exchange only when set. */
+unsigned ma5_hw_led_token(Ma5Hw *h){return h?(unsigned)h->led_token:0;}
 int ma5_hw_irq(Ma5Hw *h){return h&&h->irq?(int)InterlockedExchange(&h->irq,0):0;}
 int ma5_hw_stress(Ma5Hw *h){return (int)command(h,8,0);}
 Ma5HwStats ma5_hw_stats(Ma5Hw *h){Ma5HwStats result={0};if(h){result=h->stats;result.callbacks=(uint64_t)(unsigned)InterlockedCompareExchange(&h->callbacks,0,0);}return result;}

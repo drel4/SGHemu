@@ -3,6 +3,7 @@
 #include "nvram.h"
 #include "userfs.h"
 #include "content.h"
+#include "host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,7 +21,8 @@ int main(int argc, char **argv)
     const char *model;
     const char *lcd_output = NULL;
     const char *import_path = NULL;
-    int java_menu=0;
+    int java_menu=0,rtc_sync=0,high_priority=0,charging=0;
+    unsigned battery_percent=100;
     const char *fs_output=NULL;
     const char *nv_input = NULL, *nv_output = NULL;
     const char *state_directory = NULL; /* Default: model-local, firmware-hashed. */
@@ -30,7 +32,7 @@ int main(int argc, char **argv)
     FirmwareMatch *matches = NULL;
     unsigned first_argument = 2;
     FILE *trace = NULL, *access_log = NULL, *log;
-    if (argc < 2) { puts("sghemu MODEL.cfg | --folder PATH [instruction-budget] [--lcd-out FILE.bmp]\nOptions: --continue-unmapped --trace --mmio-trace --until ADDRESS --service\n         --nv-load FILE.snv --nv-save FILE.snv (diagnostic import/export)\n         --state-dir DIRECTORY --no-persist --sim present|none\n         --ma5-hw M5_EmuHw.dll [--audio-wav FILE.wav]\n         --audio-ticks-hz N (legacy profiles only, not CPU MHz)\n         --fs-list FILE.tsv (directory metadata, not file contents)\n         --import FILE (sound/picture or MIDP 1.0 JAR through the guest)\n         --java-menu (boot the native installed-MIDlet menu)\nNVM auto-loads/saves beside the model config in state/. Run from repo root; see build/unmapped.log."); return 2; }
+    if (argc < 2) { puts("sghemu MODEL.cfg | --folder PATH [instruction-budget] [--lcd-out FILE.bmp]\nOptions: --continue-unmapped --trace --mmio-trace --until ADDRESS --service\n         --nv-load FILE.snv --nv-save FILE.snv (diagnostic import/export)\n         --state-dir DIRECTORY --no-persist --sim present|none\n         --ma5-hw M5_EmuHw.dll [--audio-wav FILE.wav]\n         --audio-ticks-hz N (legacy profiles only, not CPU MHz)\n         --fs-list FILE.tsv (directory metadata, not file contents)\n         --import FILE (sound/picture or MIDP 1.0 JAR through the guest)\n         --java-menu (boot the native installed-MIDlet menu)\n         --rtc-sync --high-priority --battery 0..100 --charging\nNVM auto-loads/saves beside the model config in state/. Run from repo root; see build/unmapped.log."); return 2; }
     model = argv[1];
     if (!strcmp(model, "--folder")) {
         unsigned count;
@@ -51,6 +53,11 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--continue-unmapped")) continuation = 1;
         else if (!strcmp(argv[i], "--no-persist")) persistent = 0;
+        else if (!strcmp(argv[i], "--rtc-sync")) rtc_sync=1;
+        else if (!strcmp(argv[i], "--high-priority")) high_priority=1;
+        else if (!strcmp(argv[i], "--charging")) charging=1;
+        else if (!strcmp(argv[i], "--battery")&&i+1<(unsigned)argc){char *end;unsigned long n=strtoul(argv[++i],&end,10);
+            if(*end||n>100){fprintf(stderr,"Battery percentage must be 0..100.\n");return 2;}battery_percent=(unsigned)n;}
         else if (!strcmp(argv[i], "--java-menu")) java_menu=1;
         else if (!strcmp(argv[i], "--import") && i + 1 < (unsigned)argc) import_path = argv[++i];
         else if (!strcmp(argv[i], "--service")) sgh_service_mode = 1;
@@ -84,6 +91,10 @@ int main(int argc, char **argv)
     log = fopen("build/unmapped.log", "w");
     if (!log) { if (trace) fclose(trace); return 1; }
     if (!machine_load_pair(&m, model, matches ? matches[0].rom[0] : NULL, matches ? matches[0].rom[1] : NULL, log)) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
+    if(high_priority&&!host_high_priority(1)){fprintf(stderr,"Windows rejected High process priority.\n");result=1;goto done;}
+    if(rtc_sync&&!host_sync_rtc(&m.rtc)){fprintf(stderr,"Host RTC sync unavailable: model has no RTC or date is outside its year range.\n");result=1;goto done;}
+    if(rtc_sync)rtc_set_sync(&m.rtc,1);
+    battery_set(&m.battery,battery_percent,charging);
     if(sim_override>=0) {if(!m.sim.attached){fprintf(stderr,"This model has no SIM interface\n");result=1;goto done;}m.sim.present=sim_override;}
     if (persistent && !nvram_store_open(&storage, &m, state_directory)) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
     storage_ready = 1;
@@ -133,6 +144,9 @@ int main(int argc, char **argv)
         }
     }
     while (m.cpu.instructions < budget) {
+        if(rtc_sync&&!(m.cpu.instructions&65535u)){
+            rtc_set_sync(&m.rtc,1);(void)host_sync_rtc(&m.rtc);
+        }
         int provision = nvram_store_step(&storage, &m);
         if (!provision) { fprintf(stderr, "%s\n", m.error); result = 1; break; }
         if (provision == 2) {
@@ -144,6 +158,7 @@ int main(int argc, char **argv)
                 !nvram_store_open(&storage, &m, state_directory)) { fprintf(stderr, "%s\n", m.error); storage_ready = 0; result = 1; break; }
             storage.defaults_boot = initialize_defaults;
             if(sim_override>=0)m.sim.present=sim_override;
+            battery_set(&m.battery,battery_percent,charging);
             if(hardware_dll&&!ma3_enable(&m.ma3,hardware_dll,audio_wav,!audio_wav,m.clock.attached?1000000000:audio_ticks_hz)){fprintf(stderr,"MA-3 hardware: %s\n",m.ma3.error);result=1;break;}
             if (access_log) {
                 unsigned r;
@@ -156,7 +171,9 @@ int main(int argc, char **argv)
             continue;
         }
         if (until_set && m.cpu.r[15] == until) { printf("Address breakpoint reached: %08x\n", until); break; }
-        if (content.active && !content.done && !content.failed) {
+        if((m.battery.stage||!(content.active&&!content.done&&!content.failed))&&!battery_step(&m.battery,&m.cpu)){
+            fprintf(stderr,"Guest battery event failed.\n");result=1;break;}
+        if (!m.battery.stage && content.active && !content.done && !content.failed) {
             int imported = content_import_step(&content, &m);
             if (!imported) { fprintf(stderr, "%s\n", content.error); result = 1; break; }
             if (imported == 2 && content.type==10) puts(content.size ? "Java installer started; wait for the handset installation result." : "Native Java menu started.");

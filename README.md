@@ -6,6 +6,14 @@ Windows 7 API/subsystem target; actual execution on Windows 7 is untested.
 
 [Download Windows x86 builds](https://github.com/drel4/SGHemu/releases).
 
+## Phone output and appearance
+
+XEDK1 navigation/key tones now have an independent CPU/DSP PCM output, even
+without Yamaha DLLs. The program icon shows the native RGB service-LED color.
+**L&F -> LCD ghosting** toggles a saved LCD response effect;
+it does not alter guest pixels or screenshots. See
+[implementation and verification](docs/c100-phone-output.md).
+
 ## AI-assisted project
 
 This project is AI-assisted. If you hate AI-assisted software, don't use it.
@@ -148,6 +156,19 @@ JARs run through the phone's native installer; wait for **Installed**, then clos
 the phone dialog. **Java games** reboots into the native MIDlet menu using the
 saved NVM. Other firmware profiles do not yet declare these installer entries.
 The handset's own Java menu is WAP & Games -> Downloads -> Games and more.
+The **Emulation** menu also provides **High process priority** (off by default)
+and **Sync phone date/time to Windows** (on by default for C100 bring-up profiles).
+Priority changes take effect immediately; switching it off restores Normal.
+Host sync uses Windows local time, including its timezone/DST settings. Switching
+sync off allows handset clock changes and advances the RTC with emulated time.
+These preferences persist in `state/emulator.ini`; phone NVM stays model-local.
+CLI equivalents: `--high-priority` and `--rtc-sync` (both opt-in on the CLI).
+
+The GUI remembers the last successfully opened firmware/model and automatically
+loads and runs it on subsequent launches. **Emulation -> Battery** (XEDK1) offers
+an editable 0?100% level and a charging-cable toggle, persisted in
+`state/emulator.ini`. These drive native battery/charger callbacks; the voltage
+curve is provisional, not a calibrated hardware battery model.
 CPU/DSP navigation tones are not implemented yet. See
 [content import details](docs/c100-content-import.md).
 CLI: `--ma5-hw PATH`, optional `--audio-wav FILE` and `--audio-ticks-hz N`.

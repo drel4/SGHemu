@@ -9,11 +9,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <process.h>
+#include <math.h>
 #include "machine.h"
 #include "firmware.h"
 #include "nvram.h"
 #include "userfs.h"
 #include "content.h"
+#include "host.h"
 #define ID_OPEN_MODEL 100
 #define ID_OPEN_ROM 101
 #define ID_RESET 102
@@ -34,6 +36,11 @@
 #define ID_SIM 114
 #define ID_AUDIO 115
 #define ID_AUDIO_IMPORT 116
+#define ID_HIGH_PRIORITY 117
+#define ID_HOST_TIME 118
+#define ID_BATTERY_PERCENT 140
+#define ID_BATTERY_CABLE 141
+#define ID_LCD_GHOSTING 150
 #define ID_PATTERN 120
 #define ID_ZOOM1 121
 #define ID_ZOOM2 122
@@ -63,6 +70,18 @@ typedef struct {
     uint32_t audio_ticks_hz;
     int audio_enabled, audio_paused, audio_trace;
     unsigned audio_block;
+    char emulator_settings[1024];
+    int high_priority,host_time;
+    DWORD time_checkpoint;
+    int recent_firmware;
+    unsigned battery_percent;
+    int charging;
+    HWND battery_window;
+    int ghosting;
+    uint32_t *ghost_pixels;
+    DWORD ghost_tick;
+    HICON led_icons[8];
+    unsigned icon_led;
     int reload_defaults; /* set by the emulation thread, consumed by the GUI thread */
 } App;
 static App app;
@@ -101,6 +120,41 @@ static LRESULT CALLBACK filesystem_proc(HWND window, UINT message, WPARAM wparam
     }
     emu_lock(); result = filesystem_proc_unlocked(window, message, wparam, lparam); emu_unlock();
     return result;
+}
+static void update_led_icon(void)
+{
+    unsigned state=app.m.phone_io.led&7u;
+    if(app.m.ma3.led_tick>app.m.phone_io.led_tick)
+        state=app.m.ma3.led_on?app.m.ma3.led_color:0;
+    if(app.icon_led==state&&app.led_icons[state])return;
+    if(!app.led_icons[state]){
+        BITMAPINFO info={0};ICONINFO icon={0};uint32_t *pixels;HBITMAP color,mask;unsigned i;
+        uint32_t rgb=((state&1)?0xff0000:0)|((state&2)?0x00ff00:0)|((state&4)?0x0000ff:0);
+        info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=16;
+        info.bmiHeader.biHeight=-16;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
+        color=CreateDIBSection(NULL,&info,DIB_RGB_COLORS,(void **)&pixels,NULL,0);
+        mask=CreateBitmap(16,16,1,1,NULL);
+        if(!color||!mask){if(color)DeleteObject(color);if(mask)DeleteObject(mask);return;}
+        for(i=0;i<256;++i)pixels[i]=0xff000000u|rgb;
+        icon.fIcon=TRUE;icon.hbmColor=color;icon.hbmMask=mask;
+        app.led_icons[state]=CreateIconIndirect(&icon);DeleteObject(color);DeleteObject(mask);
+    }
+    if(app.led_icons[state]){
+        SendMessageA(app.window,WM_SETICON,ICON_SMALL,(LPARAM)app.led_icons[state]);
+        SendMessageA(app.window,WM_SETICON,ICON_BIG,(LPARAM)app.led_icons[state]);app.icon_led=state;
+    }
+}
+static void ghost_frame(void)
+{
+    DWORD now=GetTickCount(),elapsed=now-app.ghost_tick;size_t i,n=(size_t)app.m.width*app.m.height;
+    unsigned retain=(unsigned)(exp(-(double)elapsed/75.0)*256.0);
+    const uint32_t *target=app.pattern?app.test_pixels:app.m.pixels;
+    app.ghost_tick=now;if(!target||!app.ghost_pixels)return;
+    for(i=0;i<n;++i){unsigned shift;uint32_t result=0;
+        for(shift=0;shift<24;shift+=8){unsigned a=(app.ghost_pixels[i]>>shift)&255,b=(target[i]>>shift)&255;
+            unsigned v=(a*retain+b*(256-retain)+128)>>8;
+            if(a>b?a-b<=2:b-a<=2)v=b;result|=v<<shift;}
+        app.ghost_pixels[i]=result;}
 }
 static const char *key_names[SGH_MAX_KEYS] = {
     "Soft left", "Up", "Soft right", "Left", "OK", "Right", "Call", "Down", "End",
@@ -176,7 +230,15 @@ static void update_ui(void)
     CheckMenuItem(menu, ID_CONTINUE, MF_BYCOMMAND | (app.continuation ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, ID_PATTERN, MF_BYCOMMAND | (app.pattern ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, ID_SIM, MF_BYCOMMAND | (app.m.sim.present ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu,ID_LCD_GHOSTING,MF_BYCOMMAND|(app.ghosting?MF_CHECKED:MF_UNCHECKED));
+    phone_io_pause(&app.m.phone_io,!app.running);
     CheckMenuItem(menu, ID_AUDIO, MF_BYCOMMAND | (app.audio_enabled ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu, ID_HIGH_PRIORITY, MF_BYCOMMAND | (app.high_priority ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu, ID_HOST_TIME, MF_BYCOMMAND | (app.host_time ? MF_CHECKED : MF_UNCHECKED));
+    EnableMenuItem(menu, ID_HOST_TIME, MF_BYCOMMAND | (app.m.rtc.attached ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu, ID_BATTERY_PERCENT, MF_BYCOMMAND | (app.m.battery.enabled ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu, ID_BATTERY_CABLE, MF_BYCOMMAND | (app.m.battery.enabled ? MF_ENABLED : MF_GRAYED));
+    CheckMenuItem(menu, ID_BATTERY_CABLE, MF_BYCOMMAND | (app.charging ? MF_CHECKED : MF_UNCHECKED));
     if (app.m.ma3.hw && app.audio_paused != !app.running) {
         ma5_hw_pause(app.m.ma3.hw, !app.running); app.audio_paused = !app.running;
     }
@@ -276,6 +338,7 @@ static int save_storage(void)
 static int load_model(void)
 {
     Machine pattern = {0};
+    free(app.ghost_pixels);app.ghost_pixels=NULL;
     app.running = 0; release_keys();
     if (!save_storage()) {
         if (app.m.loaded) {
@@ -305,6 +368,15 @@ static int load_model(void)
         }
         *app.nv_input = 0;
         app.nv_checkpoint = GetTickCount();
+        battery_set(&app.m.battery,app.battery_percent,app.charging);
+        if(app.m.rtc.attached){
+            rtc_set_sync(&app.m.rtc,app.host_time);
+            if(app.host_time&&!host_sync_rtc(&app.m.rtc)){
+                MessageBoxA(app.window,"The host date is outside this model's RTC year range.","SGHemu - clock sync",MB_OK|MB_ICONERROR);
+                rtc_set_sync(&app.m.rtc,0);
+            }
+            app.time_checkpoint=GetTickCount();
+        }
         if (app.audio_enabled && app.m.ma3.attached && !app.m.cpu.halted) {
             if (!ma3_enable(&app.m.ma3, app.audio_dll, NULL, 1, app.m.clock.attached?1000000000:app.audio_ticks_hz)) {
                 MessageBoxA(app.window, app.m.ma3.error, "SGHemu - hardware audio unavailable", MB_OK | MB_ICONERROR);
@@ -342,6 +414,23 @@ static int load_model(void)
         }
     }
     app.last_key = SGH_MAX_KEYS; fit_window(); update_ui();
+    if(app.m.loaded&&!app.m.cpu.halted&&app.recent_firmware){
+        char model_path[1024],rom_path[1024],second_path[1024];
+        GetFullPathNameA(app.model,sizeof(model_path),model_path,NULL);
+        if(*app.rom)GetFullPathNameA(app.rom,sizeof(rom_path),rom_path,NULL);else *rom_path=0;
+        if(*app.second_rom)GetFullPathNameA(app.second_rom,sizeof(second_path),second_path,NULL);else *second_path=0;
+        CreateDirectoryA("state",NULL);
+        WritePrivateProfileStringA("recent_firmware","model",model_path,app.emulator_settings);
+        WritePrivateProfileStringA("recent_firmware","rom1",rom_path,app.emulator_settings);
+        WritePrivateProfileStringA("recent_firmware","rom2",second_path,app.emulator_settings);
+    }
+    if(app.m.loaded){size_t bytes=(size_t)app.m.width*app.m.height*sizeof(uint32_t);
+        app.ghost_pixels=malloc(bytes);if(app.ghost_pixels)memcpy(app.ghost_pixels,app.m.pixels,bytes);
+        app.ghost_tick=GetTickCount();
+        app.m.phone_io.mixed=app.m.ma3.hw!=NULL;
+        if(!phone_io_open(&app.m.phone_io,!app.m.phone_io.mixed,NULL))app.state="CPU tone output unavailable";
+        if(app.m.phone_io.mixed)ma5_hw_set_mixer(app.m.ma3.hw,phone_io_mix,&app.m.phone_io);
+        update_led_icon();}
     return app.m.loaded && !app.m.cpu.halted;
 }
 static void choose_file(int firmware)
@@ -360,6 +449,7 @@ static void choose_file(int firmware)
         if (firmware == 2) strcpy(app.second_rom, path);
         else if (firmware) strcpy(app.rom, path);
         else { strcpy(app.model, path); *app.rom = 0; *app.second_rom = 0; }
+        app.recent_firmware=1;
         load_model();
     }
 }
@@ -417,6 +507,7 @@ static void choose_folder(void)
             FirmwareMatch *match = &matches[chosen - 1];
             *app.nv_input = 0;
             strcpy(app.model, match->model); strcpy(app.rom, match->rom[0]); strcpy(app.second_rom, match->rom[1]);
+            app.recent_firmware=1;
             if (load_model()) {
                 app.continuation = app.m.bringup; app.running = 1;
                 app.state = app.m.bringup ? "Running - experimental hardware bring-up" : "Running";
@@ -454,6 +545,28 @@ static void import_audio(void)
         WritePrivateProfileStringA("audio","enabled",app.audio_enabled?"1":"0",app.audio_settings);
     }
 }
+static LRESULT CALLBACK battery_proc(HWND window,UINT message,WPARAM wparam,LPARAM lparam)
+{
+    (void)lparam;
+    if(message==WM_CREATE){char text[16];app.battery_window=window;
+        CreateWindowA("STATIC","Battery charge (0-100%):",WS_CHILD|WS_VISIBLE,12,14,190,20,window,NULL,NULL,NULL);
+        snprintf(text,sizeof(text),"%u",app.battery_percent);
+        CreateWindowExA(WS_EX_CLIENTEDGE,"EDIT",text,WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_NUMBER|ES_AUTOHSCROLL,
+            12,40,190,24,window,(HMENU)10,NULL,NULL);
+        CreateWindowA("BUTTON","Apply",WS_CHILD|WS_VISIBLE|WS_TABSTOP,12,78,90,26,window,(HMENU)1,NULL,NULL);
+        CreateWindowA("BUTTON","Cancel",WS_CHILD|WS_VISIBLE|WS_TABSTOP,112,78,90,26,window,(HMENU)2,NULL,NULL);return 0;
+    }
+    if(message==WM_COMMAND&&LOWORD(wparam)==1){BOOL valid;unsigned percent=GetDlgItemInt(window,10,&valid,FALSE);
+        if(!valid||percent>100){MessageBoxA(window,"Enter a percentage from 0 to 100.","Battery",MB_OK|MB_ICONINFORMATION);return 0;}
+        emu_lock();app.battery_percent=percent;battery_set(&app.m.battery,percent,app.charging);emu_unlock();
+        {char text[16];snprintf(text,sizeof(text),"%u",percent);CreateDirectoryA("state",NULL);
+            WritePrivateProfileStringA("battery","percent",text,app.emulator_settings);}
+        DestroyWindow(window);return 0;
+    }
+    if(message==WM_COMMAND&&LOWORD(wparam)==2){DestroyWindow(window);return 0;}
+    if(message==WM_DESTROY){app.battery_window=NULL;return 0;}
+    return DefWindowProcA(window,message,wparam,lparam);
+}
 static void command(unsigned id)
 {
     switch (id) {
@@ -462,6 +575,35 @@ static void command(unsigned id)
     case ID_OPEN_SECOND: choose_file(2); break;
     case ID_OPEN_FOLDER: choose_folder(); break;
     case ID_RESET: load_model(); break;
+    case ID_LCD_GHOSTING:
+        app.ghosting=!app.ghosting;app.ghost_tick=GetTickCount();
+        if(app.ghost_pixels&&app.m.pixels)memcpy(app.ghost_pixels,app.pattern?app.test_pixels:app.m.pixels,
+            (size_t)app.m.width*app.m.height*sizeof(uint32_t));
+        CreateDirectoryA("state",NULL);WritePrivateProfileStringA("look_and_feel","lcd_ghosting",app.ghosting?"1":"0",app.emulator_settings);
+        InvalidateRect(app.window,&app.lcd,FALSE);break;
+    case ID_BATTERY_PERCENT:
+        if(!app.m.battery.enabled)break;
+        if(!app.battery_window)CreateWindowExA(0,"SGHemuBattery","Battery percentage",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_VISIBLE,
+            CW_USEDEFAULT,CW_USEDEFAULT,230,150,app.window,NULL,GetModuleHandleA(NULL),NULL);
+        else {ShowWindow(app.battery_window,SW_RESTORE);SetForegroundWindow(app.battery_window);}break;
+    case ID_BATTERY_CABLE:
+        if(!app.m.battery.enabled)break;
+        app.charging=!app.charging;battery_set(&app.m.battery,app.battery_percent,app.charging);
+        CreateDirectoryA("state",NULL);WritePrivateProfileStringA("battery","charging",app.charging?"1":"0",app.emulator_settings);break;
+    case ID_HIGH_PRIORITY:
+        if(!host_high_priority(!app.high_priority)){
+            char message[160];snprintf(message,sizeof(message),"Windows could not change process priority (error %lu).",(unsigned long)GetLastError());
+            MessageBoxA(app.window,message,"SGHemu - process priority",MB_OK|MB_ICONERROR);break;
+        }
+        app.high_priority=!app.high_priority;CreateDirectoryA("state",NULL);
+        WritePrivateProfileStringA("emulation","high_priority",app.high_priority?"1":"0",app.emulator_settings);break;
+    case ID_HOST_TIME:
+        if(!app.m.rtc.attached)break;
+        if(!app.host_time&&!host_sync_rtc(&app.m.rtc)){
+            MessageBoxA(app.window,"The host date is outside this model's RTC year range.","SGHemu - clock sync",MB_OK|MB_ICONERROR);break;}
+        app.host_time=!app.host_time;rtc_set_sync(&app.m.rtc,app.host_time);
+        app.time_checkpoint=GetTickCount();CreateDirectoryA("state",NULL);
+        WritePrivateProfileStringA("emulation","sync_time",app.host_time?"1":"0",app.emulator_settings);break;
     case ID_AUDIO_IMPORT: import_audio(); break;
     case ID_AUDIO:
         if (!app.audio_enabled && !*app.audio_dll) import_audio();
@@ -537,8 +679,10 @@ static void command(unsigned id)
 }
 static HMENU make_menu(void)
 {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), emulation = CreatePopupMenu(), view = CreatePopupMenu(), help = CreatePopupMenu();
+    HMENU bar = CreateMenu(), file = CreatePopupMenu(), emulation = CreatePopupMenu(), view = CreatePopupMenu(), help = CreatePopupMenu(),battery=CreatePopupMenu();
     AppendMenuA(file, MF_STRING, ID_OPEN_FOLDER, "Open &firmware folder...\tCtrl+O");
+    HMENU look=CreatePopupMenu();
+    AppendMenuA(look,MF_STRING,ID_LCD_GHOSTING,"LCD ghosting");
     AppendMenuA(file, MF_STRING, ID_OPEN_MODEL, "Open &model config (advanced)...");
     AppendMenuA(file, MF_STRING, ID_NV_LOAD, "Import NVM snapshot and reset...");
     AppendMenuA(file, MF_STRING, ID_USERFS, "Phone filesystem manager...");
@@ -548,6 +692,11 @@ static HMENU make_menu(void)
     AppendMenuA(emulation, MF_STRING, ID_STEP, "&Step instruction\tF10"); AppendMenuA(emulation, MF_SEPARATOR, 0, NULL);
     AppendMenuA(emulation, MF_STRING, ID_CONTINUE, "Diagnostic: continue &unknown accesses");
     AppendMenuA(emulation, MF_STRING, ID_SIM, "Virtual &SIM inserted (reset)");
+    AppendMenuA(emulation, MF_STRING, ID_HIGH_PRIORITY, "High process priority");
+    AppendMenuA(emulation, MF_STRING, ID_HOST_TIME, "Sync phone date/time to Windows");
+    AppendMenuA(battery,MF_STRING,ID_BATTERY_PERCENT,"Set percentage...");
+    AppendMenuA(battery,MF_STRING,ID_BATTERY_CABLE,"Charging cable connected");
+    AppendMenuA(emulation,MF_POPUP,(UINT_PTR)battery,"Battery");
     AppendMenuA(emulation, MF_SEPARATOR, 0, NULL);
     AppendMenuA(emulation, MF_STRING, ID_AUDIO, "Experimental hardware &audio (reset)");
     AppendMenuA(emulation, MF_STRING, ID_AUDIO_IMPORT, "Import Yamaha hardware DLL...");
@@ -555,7 +704,7 @@ static HMENU make_menu(void)
     AppendMenuA(view, MF_SEPARATOR, 0, NULL); AppendMenuA(view, MF_STRING, ID_PATTERN, "LCD &test pattern"); AppendMenuA(view, MF_STRING, ID_DIAGNOSTICS, "&Diagnostics...");
     AppendMenuA(help, MF_STRING, ID_ABOUT, "&About / keyboard controls...");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "&File"); AppendMenuA(bar, MF_POPUP, (UINT_PTR)emulation, "&Emulation");
-    AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "&View"); AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help"); return bar;
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "&View"); AppendMenuA(bar,MF_POPUP,(UINT_PTR)look,"L&&F"); AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help"); return bar;
 }
 static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam, int *handled)
 {
@@ -568,7 +717,9 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
             app.buttons[i] = CreateWindowA("BUTTON", key_names[i], WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, window, (HMENU)(UINT_PTR)(ID_KEY_BASE + i), NULL, NULL);
             SendMessageA(app.buttons[i], WM_SETFONT, (WPARAM)app.font, TRUE); SetWindowSubclass(app.buttons[i], button_proc, i, 0);
         }
-        SetMenu(window, make_menu()); SetTimer(window, 1, 33, NULL); load_model(); return 0;
+        SetMenu(window, make_menu()); SetTimer(window, 1, 33, NULL);
+        if(load_model()&&app.recent_firmware){app.running=1;app.state="Running - last firmware";update_ui();}
+        return 0;
     }
     if (message == WM_SIZE) { layout(); return 0; }
     if (message == WM_PHONE_KEY) { phone_key((unsigned)wparam, (int)lparam, 1); return 0; }
@@ -577,6 +728,10 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
     if (message == WM_EXITMENULOOP) { app.menu_active = 0; return 0; }
     if (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) { release_keys(); update_ui(); }
     if (message == WM_TIMER) {
+        update_led_icon();if(app.ghosting){ghost_frame();InvalidateRect(window,&app.lcd,FALSE);}
+        if(app.host_time&&app.m.rtc.attached&&GetTickCount()-app.time_checkpoint>=1000){
+            app.time_checkpoint=GetTickCount();(void)host_sync_rtc(&app.m.rtc);
+        }
         /* GUI refresh only. Emulation runs on emu_main. */
         if (app.running) {
             if (GetTickCount() - app.nv_checkpoint >= 5000) {
@@ -610,7 +765,7 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(window, &ps);
         BITMAPINFO bitmap = {0};
-        const uint32_t *pixels = app.pattern ? app.test_pixels : app.m.pixels;
+        const uint32_t *pixels = app.ghosting&&app.ghost_pixels?app.ghost_pixels:app.pattern?app.test_pixels:app.m.pixels;
         if (pixels) {
             bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bitmap.bmiHeader.biWidth = (LONG)app.m.width;
             bitmap.bmiHeader.biHeight = -(LONG)app.m.height; bitmap.bmiHeader.biPlanes = 1; bitmap.bmiHeader.biBitCount = 32; bitmap.bmiHeader.biCompression = BI_RGB;
@@ -628,9 +783,11 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
     if (message == WM_DESTROY) {
         app.running = 0; KillTimer(window, 1); if (app.diagnostics) DestroyWindow(app.diagnostics);
         if(app.fs_window)DestroyWindow(app.fs_window);
+        if(app.battery_window)DestroyWindow(app.battery_window);
         nvram_store_release(&app.storage);
         content_import_release(&app.content);
-        machine_destroy(&app.m); free(app.test_pixels); if (app.log) fclose(app.log);
+        machine_destroy(&app.m); free(app.test_pixels);free(app.ghost_pixels);
+        {unsigned i;for(i=0;i<8;++i)if(app.led_icons[i])DestroyIcon(app.led_icons[i]);} if (app.log) fclose(app.log);
         if (app.font) DeleteObject(app.font); PostQuitMessage(0); return 0;
     }
     *handled = 0; return 0;
@@ -673,7 +830,11 @@ static void emu_slice(LONGLONG frequency, int paced)
             app.running = 0; /* idle until the GUI thread has reloaded the model */
             PostMessageA(app.window, WM_EMU_EVENT, EMU_RELOAD, 0); return;
         }
-        if (app.content.active && !app.content.done && !app.content.failed) {
+        if((app.m.battery.stage||!(app.content.active&&!app.content.done&&!app.content.failed))&&
+           !battery_step(&app.m.battery,&app.m.cpu)){
+            app.running=0;app.state="Battery event failed";return;
+        }
+        if (!app.m.battery.stage && app.content.active && !app.content.done && !app.content.failed) {
             int imported = content_import_step(&app.content, &app.m);
             if (!imported) {
                 app.running = 0;
@@ -702,7 +863,7 @@ static unsigned __stdcall emu_main(void *argument)
         /* Time-out so shutdown never waits on a lock held by a nested GUI call. */
         if (WaitForSingleObject(emu_mutex, 20) != WAIT_OBJECT_0) continue;
         if (app.running && app.m.loaded && !app.m.cpu.halted) {
-            paced = app.m.ma3.hw != NULL; ran = 1;
+            paced = app.m.ma3.hw != NULL || app.m.phone_io.output != NULL; ran = 1;
             emu_slice(frequency.QuadPart, paced);
         }
         ReleaseMutex(emu_mutex);
@@ -735,6 +896,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     }
     CreateDirectoryA("build", NULL);
     GetFullPathNameA("state/audio.ini",sizeof(app.audio_settings),app.audio_settings,NULL);
+    GetFullPathNameA("state/emulator.ini",sizeof(app.emulator_settings),app.emulator_settings,NULL);
+    app.ghosting=GetPrivateProfileIntA("look_and_feel","lcd_ghosting",0,app.emulator_settings)!=0;
+    app.icon_led=~0u;
+    app.host_time=GetPrivateProfileIntA("emulation","sync_time",1,app.emulator_settings)!=0;
+    app.battery_percent=GetPrivateProfileIntA("battery","percent",100,app.emulator_settings);
+    if(app.battery_percent>100)app.battery_percent=100;
+    app.charging=GetPrivateProfileIntA("battery","charging",0,app.emulator_settings)!=0;
+    app.high_priority=GetPrivateProfileIntA("emulation","high_priority",0,app.emulator_settings)!=0;
+    if(!host_high_priority(app.high_priority))app.high_priority=GetPriorityClass(GetCurrentProcess())==HIGH_PRIORITY_CLASS;
     GetPrivateProfileStringA("audio","hardware_dll","",app.audio_dll,sizeof(app.audio_dll),app.audio_settings);
     app.audio_enabled=GetPrivateProfileIntA("audio","enabled",0,app.audio_settings)!=0;
     app.audio_ticks_hz=GetPrivateProfileIntA("audio","ticks_hz",2166667,app.audio_settings);
@@ -744,6 +914,17 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     InitCommonControlsEx(&common);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     strcpy(app.model, "models/c100/c100xeda2.cfg"); app.zoom = 2; app.state = "Paused"; app.last_key = SGH_MAX_KEYS;
+    {
+        char recent_model[1024],recent_rom[1024],recent_second[1024];
+        GetPrivateProfileStringA("recent_firmware","model","",recent_model,sizeof(recent_model),app.emulator_settings);
+        GetPrivateProfileStringA("recent_firmware","rom1","",recent_rom,sizeof(recent_rom),app.emulator_settings);
+        GetPrivateProfileStringA("recent_firmware","rom2","",recent_second,sizeof(recent_second),app.emulator_settings);
+        if(*recent_model&&GetFileAttributesA(recent_model)!=INVALID_FILE_ATTRIBUTES&&
+           (!*recent_rom||GetFileAttributesA(recent_rom)!=INVALID_FILE_ATTRIBUTES)&&
+           (!*recent_second||GetFileAttributesA(recent_second)!=INVALID_FILE_ATTRIBUTES)){
+            strcpy(app.model,recent_model);strcpy(app.rom,recent_rom);strcpy(app.second_rom,recent_second);app.recent_firmware=1;
+        }
+    }
     release_keys();
     cls.cbSize = sizeof(cls); cls.hInstance = instance; cls.hCursor = LoadCursor(NULL, IDC_ARROW);
     cls.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); cls.lpszClassName = "SGHemuWindow"; cls.lpfnWndProc = window_proc;
@@ -752,6 +933,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     if (!RegisterClassExA(&cls)) return 1;
     cls.lpszClassName="SGHemuFilesystem";cls.lpfnWndProc=filesystem_proc;
     if(!RegisterClassExA(&cls))return 1;
+    cls.lpszClassName="SGHemuBattery";cls.lpfnWndProc=battery_proc;
+    if(!RegisterClassExA(&cls))return 1;
+    cls.lpszClassName="SGHemuWindow";cls.lpfnWndProc=window_proc;
     if (!CreateWindowExA(0, "SGHemuWindow", "SGHemu - Samsung SGH-C100", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 400, 800, NULL, NULL, instance, NULL)) return 1;
     accelerator = CreateAcceleratorTableA(keys, sizeof(keys) / sizeof(keys[0]));

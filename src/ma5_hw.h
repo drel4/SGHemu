@@ -2,6 +2,7 @@
 #define SGH_MA5_HW_H
 #include <stdint.h>
 typedef struct Ma5Hw Ma5Hw;
+typedef void (*Ma5PcmMixer)(void *,int16_t *,int16_t *,unsigned);
 typedef struct { uint64_t frames, nonzero, callbacks, underruns, adpcm_refreshes; unsigned peak; int failed; } Ma5HwStats;
 /* All DLL entry points, including load/init/terminate, run on one worker. */
 Ma5Hw *ma5_hw_open(const char *dll, const char *wav, int speakers, char *error, unsigned error_size);
@@ -10,6 +11,8 @@ void ma5_hw_write(Ma5Hw *hw, int data, unsigned value);
 void ma5_hw_fifo(Ma5Hw *hw,unsigned selector,const uint8_t *bytes,unsigned length);
 int ma5_hw_generate(Ma5Hw *hw, unsigned frames);
 /* Execute already-due FIFO commands without rendering or advancing time. */
+/* Install between synchronous commands; callback executes only on the worker. */
+void ma5_hw_set_mixer(Ma5Hw *hw,Ma5PcmMixer mixer,void *context);
 void ma5_hw_pump(Ma5Hw *hw);
 void ma5_hw_pause(Ma5Hw *hw, int paused);
 void ma5_hw_reset(Ma5Hw *hw);
@@ -21,6 +24,8 @@ unsigned ma5_hw_pcm_cursor(Ma5Hw *hw,unsigned voice);
 /* Notify completed guest sample-RAM writes; refresh decoded ADPCM on wrap. */
 void ma5_hw_ram_changed(Ma5Hw *hw,unsigned address,unsigned length);
 void ma5_hw_register(Ma5Hw *hw,unsigned reg,unsigned value,unsigned bank);
+/* Last sequenced host LED marker, sampled on the DLL worker. */
+unsigned ma5_hw_led_token(Ma5Hw *hw);
 int ma5_hw_irq(Ma5Hw *hw);
 int ma5_hw_stress(Ma5Hw *hw);
 Ma5HwStats ma5_hw_stats(Ma5Hw *hw);

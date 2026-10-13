@@ -10,9 +10,10 @@ the firmware, not the host, constructs its filesystem records.
 * Sounds retain the existing type-6 guest writer path.
 * PNG/JPEG/GIF/BMP pictures are decoded with Windows WIC, fitted proportionally
   inside 128 x 128 and converted to RGB565. Animated inputs use the first frame.
-  The native container is nine bytes (width, height, animation flag, frame count,
-  reserved byte, little-endian pixel-data length), followed by little-endian
-  pixels. The guest writer stores it as type 7. A 32 x 24 checker image was
+  The native container has a nine-byte animation header (width, height,
+  animation flag, frame count, reserved byte, little-endian bitmap-body length),
+  followed by a two-byte format/palette header and little-endian RGB565 pixels.
+  The guest writer stores it as type 7. A 32 x 24 checker image was
   accepted as a 1,545-byte picture in a scratch snapshot. On a fresh boot,
   Phone settings -> My settings -> Wallpaper -> Up -> OK displays the imported
   red/green checker through the native image renderer.
@@ -447,3 +448,44 @@ instructions.
 
 No ROM byte, host-authored record payload or invented checksum is used at any
 step; the guest builds all storage bytes.
+
+## Odd-length downloadable media (2026-10-14)
+
+The host importer previously passed the exact byte length to the guest writer.
+`ReadRecordData` (`011611F0`) computes the flash read count as `byte_length >> 1`;
+`FlashRead` (`01000C38`) transfers that many halfwords. Consequently an odd-length
+file is written correctly but its last byte is not returned to the media parser.
+
+Reproduced with the user's Bumer-Zapravka MMF (19,085 bytes): flash retained its
+last CRC byte `B6`, but native readback returned stale `42`. Selecting it after
+O-Zone produced zero nonzero PCM samples for all 20 measured seconds. Padding
+the stored file to 19,086 bytes with one trailing zero restores the CRC byte on
+readback; the same playback route is audible in the first measured second and
+throughout the 20-second capture. The MMMD declared length and every original
+SMAF byte remain unchanged. The original O-Zone sample is 15,896 bytes and did
+not need padding. Test files, NVM and WAV captures remain ignored/private.
+
+The importer now rounds sound and picture storage lengths up to an even byte
+count. Re-import previously broken files: existing NVM entries are not silently
+rewritten. New imports use a collision suffix rather than overwrite old entries.
+
+## Imported-picture one-pixel shift (2026-10-14)
+
+The original encoder omitted the bitmap body's two-byte format/palette prefix.
+The firmware renderer consumes that prefix, so it skipped the first RGB565 pixel
+and carried the next row's first pixel into the right edge. The corrected body
+starts with `00 00` (raw bitmap, no palette) before the RGB565 pixels; the
+animation header's frame length includes these two bytes. The outer animation
+header remains nine bytes. No global LCD coordinates or native assets are moved.
+
+A 128 x 64 RGB565 edge-marker test through the native wallpaper selector proved
+the difference: old import row 50 had green at x=0 and red at x=127; corrected
+import has red at x=0, green at x=1, and blue at x=127, matching the source.
+The firmware also requires an even filesystem storage length, as above.
+Re-import existing pictures to replace the old representation.
+
+For this saved NVM, the wallpaper selector initially highlighted the previously
+saved `brian` entry. Up selected `No wallpaper`, not the last imported picture.
+The correct regression route was Menu -> Phone settings -> My settings ->
+Wallpaper -> Down twice -> OK, selecting `border128`. Probe routes must inspect
+the current selection rather than assume a fixed initial index.

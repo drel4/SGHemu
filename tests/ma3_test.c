@@ -9,7 +9,7 @@ static unsigned parameter_address, parameter_value, registers[64];
 static unsigned memory_address,memory_full,memory_value;
 static unsigned native_selector,native_low,native_high;
 static unsigned sample_cursor,sample_voice;
-static unsigned changed_address,changed_length;
+static unsigned changed_address,changed_length,led_token;
 #define CHECK(x) do { ++checks; if(!(x)){fprintf(stderr,"MA-3 line %d: %s\n",__LINE__,#x);exit(1);} } while(0)
 Ma5Hw *ma5_hw_open(const char *d,const char *w,int s,char *e,unsigned n)
 { (void)d;(void)w;(void)s;(void)e;(void)n;return &mock; }
@@ -26,6 +26,7 @@ unsigned ma5_hw_memory(Ma5Hw *h,unsigned a,int full){(void)h;memory_address=a;me
 unsigned ma5_hw_pcm_cursor(Ma5Hw *h,unsigned voice){(void)h;sample_voice=voice;return sample_cursor;}
 void ma5_hw_register(Ma5Hw *h,unsigned r,unsigned v,unsigned bank){(void)h;(void)bank;CHECK(r<64);registers[r]=v;}
 int ma5_hw_generate(Ma5Hw *h,unsigned n){(void)h;frames+=n;return 1;}
+unsigned ma5_hw_led_token(Ma5Hw *h){(void)h;return led_token;}
 void ma5_hw_pump(Ma5Hw *h){(void)h;++pumps;}
 int ma5_hw_irq(Ma5Hw *h){unsigned result=irq;(void)h;irq=0;return (int)result;}
 static Bus bus;
@@ -126,9 +127,18 @@ int main(void)
     sample_cursor=1984;ss(3);data(0x51);data(0x82);data(0x80);ss(0x11);
     CHECK(bus_read(&bus,0x200004,1)==0x40); /* Ring-buffer wrap, not linear end. */
     /* Unsupported delayed controls must not discard their time delta. */
-    count=0;ss(1);data(0x87);data(0x46);data(0x82);data(0x80);
+    count=0;ss(1);data(0x87);data(0x47);data(0x82);data(0x80);
     CHECK(m.unsupported==1);CHECK(values[2]==0x87);
     CHECK(values[3]==0x5f && values[4]==0x83 && values[5]==0x80);
+    /* LED commands retain their delta and update only when the DLL sequencer
+       executes the private stored marker. No color is carried in the MMF. */
+    count=0;ss(1);data(0x87);data(0x46);data(0x82);data(0x81);
+    CHECK(m.unsupported==1&&m.led_on==0);
+    CHECK(values[2]==0x87&&values[3]==0x5e&&values[4]==0x83&&values[5]==0x83);
+    led_token=3;bus.ticks=17;ma3_advance(&m,478);
+    CHECK(m.led_on==1&&m.led_tick==17&&m.led_events==1);
+    CHECK(m.led_color==1||m.led_color==2||m.led_color==3||m.led_color==4);
+    led_token=4;bus.ticks=18;
     ma3_advance(&m,479);CHECK(frames==0);ma3_advance(&m,480);CHECK(frames==480);
     irq=1;ma3_advance(&m,960);CHECK(frames==960);CHECK(intc.pending==0x800000);
     CHECK(m.irq_events==1);ma3_advance(&m,961);CHECK(m.irq_events==1);

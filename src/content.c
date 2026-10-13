@@ -12,8 +12,8 @@ static int fail(ContentImport *im, const char *reason)
     snprintf(im->error, sizeof(im->error), "Content import: %s", reason);
     im->failed = 1; return 0;
 }
-/* Draw_Image reads a nine-byte bitmap-animation header followed by little-
-   endian RGB565. Decode on the host, but let the guest build the FS records. */
+/* Draw_Image reads a nine-byte animation header. Its bitmap body includes a
+   two-byte format/palette header before the RGB565 pixels. */
 static int picture(ContentImport *im)
 {
     IWICImagingFactory *factory=NULL;IWICStream *stream=NULL;
@@ -41,11 +41,11 @@ static int picture(ContentImport *im)
     if(FAILED(IWICImagingFactory_CreateFormatConverter(factory,&converter))||
        FAILED(IWICFormatConverter_Initialize(converter,source,&GUID_WICPixelFormat16bppBGR565,
            WICBitmapDitherTypeNone,NULL,0,WICBitmapPaletteTypeCustom)))goto done;
-    size=w*h*2;bitmap=calloc(1,size+9);if(!bitmap)goto done;
+    size=w*h*2;bitmap=calloc(1,size+11);if(!bitmap)goto done;
     bitmap[0]=(uint8_t)w;bitmap[1]=(uint8_t)h;bitmap[3]=1;
-    bitmap[5]=(uint8_t)size;bitmap[6]=(uint8_t)(size>>8);
-    if(FAILED(IWICFormatConverter_CopyPixels(converter,NULL,w*2,size,bitmap+9)))goto done;
-    free(im->file);im->file=bitmap;bitmap=NULL;im->size=size+9;im->type=7;ok=1;
+    bitmap[5]=(uint8_t)(size+2);bitmap[6]=(uint8_t)((size+2)>>8);
+    if(FAILED(IWICFormatConverter_CopyPixels(converter,NULL,w*2,size,bitmap+11)))goto done;
+    free(im->file);im->file=bitmap;bitmap=NULL;im->size=size+11;im->type=7;ok=1;
 done:
     free(bitmap);
     if(converter)IWICFormatConverter_Release(converter);
@@ -144,6 +144,16 @@ int content_import_open(ContentImport *im, Machine *m, const char *path)
                  !_stricmp(ext,".gif")||!_stricmp(ext,".bmp"))) {
             if(!picture(im)){free(im->file);im->file=NULL;return 0;}
         }
+    }
+    /* ReadRecordData converts the requested byte length to halfwords with
+       length >> 1. The native download path therefore needs an even stored
+       length: otherwise an odd SMAF loses its final CRC byte on playback.
+       Padding is outside the MMMD length and leaves all SMAF bytes intact.
+       Bitmap records have the same filesystem read constraint. */
+    if(im->size&1u){
+        uint8_t *padded=realloc(im->file,(size_t)im->size+1);
+        if(!padded){free(im->file);im->file=NULL;return fail(im,"cannot pad the phone content buffer");}
+        im->file=padded;im->file[im->size++]=0;
     }
     if(im->size>0x10000){free(im->file);im->file=NULL;return fail(im,"phone content exceeds 64 KiB");}
     im->trigger = m->import_trigger; im->alloc = m->import_alloc;

@@ -16,6 +16,8 @@ typedef struct {
     uint8_t delayed[1024];
     uint64_t translated, unsupported;
     uint64_t fifo_clears, partial_drops; /* FIFO clear pulses seen / clears that dropped a half-received packet */
+    unsigned led_serial,led_token,led_on,led_color,led_rng;
+    uint64_t led_tick,led_events;
     unsigned block_frames; /* PCM generated per DLL step; 0 means 480 (10 ms) */
     FILE *trace; char error[256];
 } Ma3;

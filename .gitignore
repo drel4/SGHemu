@@ -31,3 +31,7 @@
 *.exp
 *.gpr
 *.rep/
+
+# Local diagnostic output and Python caches
+*.log
+__pycache__/
