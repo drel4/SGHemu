@@ -24,6 +24,7 @@
 #define ID_OPEN_FOLDER 105
 #define ID_NV_LOAD 106
 #define ID_USERFS 107
+#define ID_LOGGING 108
 #define ID_FS_REFRESH 300
 #define ID_FS_DIRECTORY 301
 #define ID_FS_BACKUP 302
@@ -68,7 +69,7 @@ typedef struct {
     unsigned last_key;
     char audio_dll[1024], audio_settings[1024];
     uint32_t audio_ticks_hz;
-    int audio_enabled, audio_paused, audio_trace;
+    int audio_enabled, audio_paused, logging;
     unsigned audio_block;
     char emulator_settings[1024];
     int high_priority,host_time;
@@ -234,6 +235,7 @@ static void update_ui(void)
     phone_io_pause(&app.m.phone_io,!app.running);
     CheckMenuItem(menu, ID_AUDIO, MF_BYCOMMAND | (app.audio_enabled ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, ID_HIGH_PRIORITY, MF_BYCOMMAND | (app.high_priority ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu,ID_LOGGING,MF_BYCOMMAND|(app.logging?MF_CHECKED:MF_UNCHECKED));
     CheckMenuItem(menu, ID_HOST_TIME, MF_BYCOMMAND | (app.host_time ? MF_CHECKED : MF_UNCHECKED));
     EnableMenuItem(menu, ID_HOST_TIME, MF_BYCOMMAND | (app.m.rtc.attached ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(menu, ID_BATTERY_PERCENT, MF_BYCOMMAND | (app.m.battery.enabled ? MF_ENABLED : MF_GRAYED));
@@ -335,6 +337,25 @@ static int save_storage(void)
     MessageBoxA(app.window, app.m.error, "SGHemu - automatic NVM save failed", MB_OK | MB_ICONERROR);
     update_ui(); return 0;
 }
+/* Called with emu_mutex held: neither the CPU nor MA port tracing can write
+   while their FILE pointers are replaced. Enabling is all-or-nothing. */
+static int apply_logging(int enabled)
+{
+    FILE *unmapped=NULL,*traffic=NULL;
+    if(enabled){
+        unmapped=fopen("build/gui-unmapped.log","a");
+        if(unmapped)traffic=fopen("build/gui-ma3-traffic.log","a");
+        if(!unmapped||!traffic){if(unmapped)fclose(unmapped);if(traffic)fclose(traffic);return 0;}
+        (void)setvbuf(unmapped,NULL,_IOFBF,65536);
+        (void)setvbuf(traffic,NULL,_IOFBF,65536);
+        fputs("# GUI logging enabled\n",unmapped);fputs("# GUI logging enabled\n",traffic);
+    }
+    app.m.bus.log=NULL;
+    if(app.log)fclose(app.log);
+    if(app.m.ma3.trace)fclose(app.m.ma3.trace);
+    app.log=unmapped;app.m.bus.log=unmapped;app.m.ma3.trace=traffic;
+    app.logging=!!enabled;return 1;
+}
 static int load_model(void)
 {
     Machine pattern = {0};
@@ -351,8 +372,7 @@ static int load_model(void)
     nvram_store_release(&app.storage);
     machine_destroy(&app.m);
     if (app.log) { fflush(app.log); fclose(app.log); app.log = NULL; }
-    app.log = fopen("build/gui-unmapped.log", "w");
-    if (!app.log) { app.state = "Cannot open diagnostic log"; update_ui(); return 0; }
+    app.log = NULL;
     if (!machine_load_pair(&app.m, app.model, *app.rom ? app.rom : NULL,
         *app.second_rom ? app.second_rom : NULL, app.log)) {
         app.state = "No firmware loaded";
@@ -384,9 +404,14 @@ static int load_model(void)
             } else {
                 app.audio_paused=0;
                 if(!ma3_set_block(&app.m.ma3,app.audio_block))app.audio_block=480;
-                if(app.audio_trace)app.m.ma3.trace=fopen("build/gui-ma3-traffic.log","w");
+
             }
         }
+    }
+    if(!apply_logging(app.logging)){
+        app.logging=0;
+        WritePrivateProfileStringA("diagnostics","logging","0",app.emulator_settings);
+        MessageBoxA(app.window,"Could not open the diagnostic logs in build. Logging remains off.","SGHemu - logging",MB_OK|MB_ICONERROR);
     }
     free(app.test_pixels); app.test_pixels = NULL; app.pattern = 0;
     if (app.m.loaded) {
@@ -575,6 +600,12 @@ static void command(unsigned id)
     case ID_OPEN_SECOND: choose_file(2); break;
     case ID_OPEN_FOLDER: choose_folder(); break;
     case ID_RESET: load_model(); break;
+    case ID_LOGGING:
+        if(!apply_logging(!app.logging)){
+            MessageBoxA(app.window,"Could not open the diagnostic logs in build. Logging was not changed.","SGHemu - logging",MB_OK|MB_ICONERROR);break;
+        }
+        CreateDirectoryA("state",NULL);
+        WritePrivateProfileStringA("diagnostics","logging",app.logging?"1":"0",app.emulator_settings);break;
     case ID_LCD_GHOSTING:
         app.ghosting=!app.ghosting;app.ghost_tick=GetTickCount();
         if(app.ghost_pixels&&app.m.pixels)memcpy(app.ghost_pixels,app.pattern?app.test_pixels:app.m.pixels,
@@ -686,6 +717,7 @@ static HMENU make_menu(void)
     AppendMenuA(file, MF_STRING, ID_OPEN_MODEL, "Open &model config (advanced)...");
     AppendMenuA(file, MF_STRING, ID_NV_LOAD, "Import NVM snapshot and reset...");
     AppendMenuA(file, MF_STRING, ID_USERFS, "Phone filesystem manager...");
+    AppendMenuA(file,MF_STRING,ID_LOGGING,"&Logging");
     AppendMenuA(file, MF_STRING, ID_RESET, "&Reset\tCtrl+R"); AppendMenuA(file, MF_SEPARATOR, 0, NULL);
     AppendMenuA(file, MF_STRING, ID_EXIT, "E&xit");
     AppendMenuA(emulation, MF_STRING, ID_RUN, "&Run\tF5"); AppendMenuA(emulation, MF_STRING, ID_PAUSE, "&Pause\tF6");
@@ -910,7 +942,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     app.audio_ticks_hz=GetPrivateProfileIntA("audio","ticks_hz",2166667,app.audio_settings);
     if(app.audio_ticks_hz<48000||app.audio_ticks_hz>100000000)app.audio_ticks_hz=2166667;
     app.audio_block=GetPrivateProfileIntA("audio","block",96,app.audio_settings); /* frames per DLL step: 48, 96, 120, 160, 240 or 480 */
-    app.audio_trace=GetPrivateProfileIntA("audio","trace",0,app.audio_settings)!=0; /* traffic log is slow: opt in with trace=1 */
+    app.logging=GetPrivateProfileIntA("diagnostics","logging",0,app.emulator_settings)!=0;
     InitCommonControlsEx(&common);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     strcpy(app.model, "models/c100/c100xeda2.cfg"); app.zoom = 2; app.state = "Paused"; app.last_key = SGH_MAX_KEYS;

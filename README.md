@@ -14,6 +14,12 @@ without Yamaha DLLs. The program icon shows the native RGB service-LED color.
 it does not alter guest pixels or screenshots. See
 [implementation and verification](docs/c100-phone-output.md).
 
+**File -> Logging** toggles both `build/gui-unmapped.log` and
+`build/gui-ma3-traffic.log` while running, without resetting the phone.
+Logging is off by default, saved under `[diagnostics] logging` in
+`state/emulator.ini`, and appends across toggles/resets. The old audio-only
+`[audio] trace` setting no longer enables GUI logging.
+
 ## AI-assisted project
 
 This project is AI-assisted. If you hate AI-assisted software, don't use it.
@@ -111,15 +117,15 @@ CLI persistence is on by default; `--state-dir DIRECTORY` selects a different
 store, and `--no-persist` gives an isolated erased-storage diagnostic run.
 `--nv-load`/`--nv-save` remain explicit diagnostic import/export options.
 `--sim present|none` overrides card presence for that run.
-Diagnostic logs and captures go into ignored `build/`; logs are overwritten on
-reload/run. Flash changes affect host-owned emulated memory only, not ROM files.
+Diagnostic logs and captures go into ignored `build/`. GUI logging is disabled
+by default and appends when enabled; CLI diagnostic runs use their own logs. Flash changes affect host-owned emulated memory only, not ROM files.
 
 ## Verification
 
-`build.cmd` runs 255 CPU/bus, 118 machine, 100 peripheral, 24 firmware-folder,
-158 NVM snapshot/persistence, 43 keypad, 73 internal-ROM HLE, 135 SIM,
-267 MA-3 and 20 filesystem checks (**1,193 total**) using synthetic
-fixtures (no proprietary inputs required). Optional real-ROM
+`build.cmd release` runs **1,454 checks** covering ARM/Thumb, memory and
+peripherals, firmware detection, NVM, keypad/SIM, MA-3, content/JAR imports,
+RTC, CPU tone/LED mixing and ADPCM lookahead. Synthetic tests require no
+proprietary inputs. Optional real-ROM
 regressions, compiled by the same build:
 
 ```powershell
@@ -129,7 +135,25 @@ regressions, compiled by the same build:
 .\build\c100_identity_test.exe
 ```
 
-## Audio
+## Obtaining firmware
+
+You can find firmware in the
+[Samsung firmware Telegram post](https://t.me/samsfunclub/6/2543).
+Download and extract the ROM files yourself, then choose
+**File -> Open firmware folder...** and select the folder containing both BIN
+images. The emulator detects supported C100 firmware sets by their hashes.
+ROMs are not included in SGHemu releases.
+
+## MA audio
+
+For MA-3 ringtone/startup sound, download the
+[Yamaha SMAF newer DLLs archive](https://3.onj.me/phonetones/Software%20and%20Soundbanks/Software/Yamaha%20SMAF/SMAF_newer_DLLs.zip)
+and extract **only `M5_EmuHw.dll`**. In SGHemu, choose
+**Emulation -> Import Yamaha hardware DLL...**, select that file, then run the
+phone. The emulator does **not** require `M5_EmuSmw5.dll` or a separate voice bank.
+The selected DLL must match the supported hash/version. DLLs are not bundled.
+
+### Audio implementation and standalone diagnostics
 
 MA-5 standalone native file playback with embedded FM voices has been proved;
 `__cdecl` was verified in Ghidra and through 1,000,000 calls without ESP drift.
@@ -166,10 +190,10 @@ CLI equivalents: `--high-priority` and `--rtc-sync` (both opt-in on the CLI).
 
 The GUI remembers the last successfully opened firmware/model and automatically
 loads and runs it on subsequent launches. **Emulation -> Battery** (XEDK1) offers
-an editable 0?100% level and a charging-cable toggle, persisted in
+an editable 0-100% level and a charging-cable toggle, persisted in
 `state/emulator.ini`. These drive native battery/charger callbacks; the voltage
 curve is provisional, not a calibrated hardware battery model.
-CPU/DSP navigation tones are not implemented yet. See
+CPU/DSP navigation tones are implemented separately from MA synthesis. See
 [content import details](docs/c100-content-import.md).
 CLI: `--ma5-hw PATH`, optional `--audio-wav FILE` and `--audio-ticks-hz N`.
 The tick rate is not a measured CPU clock. DLL download requires explicit consent;
