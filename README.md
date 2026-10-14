@@ -137,8 +137,7 @@ regressions, compiled by the same build:
 
 ## Obtaining firmware
 
-You can find firmware in the
-[Samsung firmware Telegram post](https://t.me/samsfunclub/6/2543).
+You can find firmware [here](https://t.me/samsfunclub/6/2543).
 Download and extract the ROM files yourself, then choose
 **File -> Open firmware folder...** and select the folder containing both BIN
 images. The emulator detects supported C100 firmware sets by their hashes.
@@ -146,8 +145,8 @@ ROMs are not included in SGHemu releases.
 
 ## MA audio
 
-For MA-3 ringtone/startup sound, download the
-[Yamaha SMAF newer DLLs archive](https://3.onj.me/phonetones/Software%20and%20Soundbanks/Software/Yamaha%20SMAF/SMAF_newer_DLLs.zip)
+For MA-3 ringtone/startup sound, download the archive
+[here](https://3.onj.me/phonetones/Software%20and%20Soundbanks/Software/Yamaha%20SMAF/SMAF_newer_DLLs.zip)
 and extract **only `M5_EmuHw.dll`**. In SGHemu, choose
 **Emulation -> Import Yamaha hardware DLL...**, select that file, then run the
 phone. The emulator does **not** require `M5_EmuSmw5.dll` or a separate voice bank.
