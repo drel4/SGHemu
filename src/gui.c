@@ -798,6 +798,10 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
         HDC dc = BeginPaint(window, &ps);
         BITMAPINFO bitmap = {0};
         const uint32_t *pixels = app.ghosting&&app.ghost_pixels?app.ghost_pixels:app.pattern?app.test_pixels:app.m.pixels;
+        /* Layout invalidates without WM_ERASEBKGND. Clear the paint region so
+           shrinking/moving the LCD cannot leave its old pixels behind. The DC
+           clips child buttons and regions outside the current update area. */
+        FillRect(dc, &ps.rcPaint, GetSysColorBrush(COLOR_BTNFACE));
         if (pixels) {
             bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bitmap.bmiHeader.biWidth = (LONG)app.m.width;
             bitmap.bmiHeader.biHeight = -(LONG)app.m.height; bitmap.bmiHeader.biPlanes = 1; bitmap.bmiHeader.biBitCount = 32; bitmap.bmiHeader.biCompression = BI_RGB;
