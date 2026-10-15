@@ -94,7 +94,13 @@ static int make_reply(WapGateway *g,WapTransaction *t,const uint8_t *data,size_t
     t->reply=malloc(WAP_REPLY_MAX);if(!t->reply)return 0;
     if(data[0]==1){/* ConnectReply: server receive SDU 4096; no Push or large-data promise. */
         static const uint8_t reply[]={2,1,4,0,3,0x81,0xa0,0};g->session=1;memcpy(t->reply,reply,sizeof(reply));t->size=sizeof(reply);return 1;}
-    if(data[0]==9){static const uint8_t reply[]={2,1,0,0};memcpy(t->reply,reply,sizeof(reply));t->size=sizeof(reply);return 1;}
+    if(data[0]==9){uint32_t session,capabilities;
+        /* WSP 8.2.5: Resume is answered with Reply, NOT ConnectReply.
+           The latter makes UP.Browser abort with protocol error on reopen. */
+        static const uint8_t reply[]={4,0x20,3,0x94,0x8d,0x80};
+        if(!uintvar(data,size,&at,&session)||!uintvar(data,size,&at,&capabilities)||
+            session!=g->session||capabilities){status=400;goto error_page;}
+        memcpy(t->reply,reply,sizeof(reply));t->size=sizeof(reply);return 1;}
     if(data[0]!=0x40&&data[0]!=0x42){status=405;goto error_page;}
     if(!uintvar(data,size,&at,&uri_size)||uri_size>=sizeof(url)||uri_size>size-at){status=400;goto error_page;}
     /* The C100 sends GET with a zero-length URI when its homepage is blank.

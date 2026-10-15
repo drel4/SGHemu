@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#define BUS_MAX_REGIONS 32
+#define BUS_MAX_REGIONS 64
 #define BUS_PAGE_SHIFT 16
 #define BUS_MAX_WATCH 8
 typedef uint32_t (*PeripheralRead)(void *, uint32_t, unsigned);

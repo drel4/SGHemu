@@ -1,4 +1,5 @@
 #include "ma3.h"
+#include "ma_water.h"
 #include <string.h>
 static void reset_parameters(Ma3 *m)
 {
@@ -13,6 +14,39 @@ static void reset_parameters(Ma3 *m)
     m->packet_phase=m->address_bytes=m->length_bytes=m->response_mask=0;
     m->packet_address=m->packet_length=0;
     m->delayed_length=m->delayed_phase=m->delayed_address=m->delayed_count=m->delayed_count_bytes=0;
+    m->sequence_divider=m->sequence_valid=0;
+    m->water_sample_burst=0;
+}
+static void sequence_clock(Ma3 *m)
+{
+    unsigned divider=m->sequence_divider;
+    if(!m->hw||!m->sequence_valid)return;
+    if(m->water){divider=(divider*(m->water_scale?m->water_scale:100)+50)/100;
+        if(divider<64)divider=64;if(divider>16383)divider=16383;}
+    ma5_hw_register(m->hw,0x23,divider>>6,m->bank);
+    ma5_hw_register(m->hw,0x24,(divider&63)<<2,m->bank);
+    /* Water can run between guest port accesses, including a register read
+       or a RAM packet. The helper leaves native selector 4 selected; restore
+       the guest's selection before its next data access. */
+    ma5_hw_write(m->hw,0,m->selector);
+}
+static unsigned water_voice(Ma3 *m,unsigned address,unsigned value)
+{
+    unsigned voice=address<0x90?address:address>=0xe0&&address<0x140?address-0xe0:UINT32_MAX;
+    /* Leave voice selection and note-gate fields alone; damage pitch and
+       expression payloads without redirecting a voice to arbitrary RAM. */
+    if(m->water&&voice!=UINT32_MAX&&voice%6>=2&&voice%6<=4){
+        uint32_t r=ma_water_random(&m->water_rng);
+        if((r&7u)==0){value^=1u<<((r>>8)%6);++m->water_faults;}
+    }
+    return value; /* Keep terminator/channel bits and all address/length bytes. */
+}
+static unsigned water_sample(Ma3 *m,unsigned value)
+{
+    unsigned result=value;
+    if(m->water){result=ma_water_sample_byte(&m->water_rng,&m->water_sample_burst,value);
+        if(result!=value)++m->water_faults;}
+    return result;
 }
 static unsigned translate_address(unsigned address)
 {
@@ -68,7 +102,7 @@ static void immediate_parameter(Ma3 *m,unsigned address,unsigned value)
 {
     unsigned mapped=translate_address(address);
     if(!m->hw)return;
-    if(mapped!=UINT32_MAX){ma5_hw_parameter(m->hw,mapped,address==0x146?led_marker(m,value):translate_value(address,value));++m->translated;}
+    if(mapped!=UINT32_MAX){ma5_hw_parameter(m->hw,mapped,address==0x146?led_marker(m,value):translate_value(address,water_voice(m,address,value)));++m->translated;}
     else if(address==0x161){
         ma5_hw_register(m->hw,0x26,value&3,m->bank);
         /* SeekControl starts, polls the FIFO sixteen times, then stops/clears.
@@ -85,8 +119,7 @@ static void immediate_parameter(Ma3 *m,unsigned address,unsigned value)
         unsigned divider=((unsigned)m->parameter_ram[0x15e]<<7)|(value&127);
         unsigned native=(divider*m->sequence_quantum_ns+542u)/1085u;
         if(native>16383){strcpy(m->error,"MA-3 sequence divider exceeds MA-5 range");return;}
-        ma5_hw_register(m->hw,0x23,native>>6,m->bank);
-        ma5_hw_register(m->hw,0x24,(native&63)<<2,m->bank);++m->translated;
+        m->sequence_divider=native;m->sequence_valid=1;sequence_clock(m);++m->translated;
     }
     else if(address==0x160){ma5_hw_register(m->hw,0x25,value&127,m->bank);++m->translated;}
     /* MA-3 secondary timer: C100 programs prescale 27 / reload 20, and
@@ -134,9 +167,11 @@ static void delayed_packet(Ma3 *m,unsigned value)
         /* Preserve the delay of an unsupported command with a hardware NOP. */
         if(mapped==0x1df)packet[length++]=128;
         else for(i=m->address_end;i<m->delayed_length;++i)
-            packet[length++]=(uint8_t)(m->address_count==3?m->delayed[i]:
+            packet[length++]=(uint8_t)(m->address_count==3?
+                (i<m->address_end+m->delayed_count_bytes?m->delayed[i]:water_sample(m,m->delayed[i])):
                 (m->delayed_address+i-m->address_end==0x146?led_marker(m,m->delayed[i]):
-                 translate_value(m->delayed_address+i-m->address_end,m->delayed[i])));
+                 translate_value(m->delayed_address+i-m->address_end,
+                    water_voice(m,m->delayed_address+i-m->address_end,m->delayed[i]))));
         ma5_hw_fifo(m->hw,1,packet,length);
         ++m->translated;
     }
@@ -187,7 +222,7 @@ static void parameter_packet(Ma3 *m,unsigned value)
             m->packet_phase=3;
         } else {
             if(m->packet_address<sizeof(m->parameter_ram))m->parameter_ram[m->packet_address]=(uint8_t)(m->address_bytes==3?value:value&127);
-            if(m->address_bytes==3){if(m->hw)ma5_hw_write(m->hw,1,value);}
+            if(m->address_bytes==3){if(m->hw)ma5_hw_write(m->hw,1,water_sample(m,value));}
             else immediate_parameter(m,m->packet_address,value);
             ++m->packet_address;
             if(m->address_bytes==3){
@@ -294,7 +329,15 @@ int ma3_enable(Ma3 *m,const char *dll,const char *wav,int speakers,uint32_t tick
        default count. Register 0x38 bit0=1 selects the 32-voice bank
        (case 0x38 -> FUN_10016198(engine,~v&1): 0 -> 32 voices). */
     ma5_hw_register(m->hw,0x38,1,0);
-    m->ticks_hz=ticks_hz;m->last_tick=m->bus->ticks;m->fractional=m->pending_frames=0;return 1;
+    m->ticks_hz=ticks_hz;m->last_tick=m->bus->ticks;m->fractional=m->pending_frames=0;
+    ma5_hw_set_water(m->hw,m->water);return 1;
+}
+void ma3_set_water(Ma3 *m,int enabled)
+{
+    if(m->water==!!enabled)return;
+    m->water=!!enabled;m->water_scale=100;m->water_next=0;
+    m->water_sample_burst=0;
+    ma5_hw_set_water(m->hw,m->water);sequence_clock(m);
 }
 int ma3_set_block(Ma3 *m,unsigned frames)
 {
@@ -306,6 +349,9 @@ void ma3_advance(Ma3 *m,uint64_t ticks)
     uint64_t scaled;
     unsigned block=m->block_frames?m->block_frames:480;
     if(!m->hw)return;
+    if(m->water&&ticks>=m->water_next){uint32_t r=ma_water_random(&m->water_rng);
+        m->water_scale=25+r%301;sequence_clock(m);++m->water_faults;
+        m->water_next=ticks+(uint64_t)m->ticks_hz*(25+(r>>16)%136)/1000;}
     if(ticks>=m->next_sample) {
       scaled=m->fractional+(ticks-m->last_tick)*48000;m->last_tick=ticks;
       if(scaled<m->ticks_hz)m->fractional=scaled;

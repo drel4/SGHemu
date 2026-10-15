@@ -69,7 +69,12 @@ int cellular_call(Cellular *s,Bus *bus,const char *number)
 }
 int cellular_sms(Cellular *s,const char *number,const uint16_t *text,unsigned length,const uint8_t scts[7])
 {
+    return cellular_sms_class(s,number,text,length,scts,-1);
+}
+int cellular_sms_class(Cellular *s,const char *number,const uint16_t *text,unsigned length,const uint8_t scts[7],int message_class)
+{
     SimCard *temp;SimFile *sms=NULL;uint8_t data[0x10c]={0};unsigned i,n,slot;
+    if(message_class< -1||message_class>3)return error(s,"SMS class must be Normal or 0-3");
     if(!s->enabled||!s->name_ptr||!s->sr_task)return error(s,"Wait for the enabled cellular network to initialize");
     temp=calloc(1,sizeof(*temp));if(!temp)return error(s,"Cannot prepare SMS");sim_card_init(temp);
     slot=sim_card_deliver_sms(temp,number,text,length,scts);
@@ -77,7 +82,11 @@ int cellular_sms(Cellular *s,const char *number,const uint16_t *text,unsigned le
     for(i=0;i<temp->count;++i)if(temp->files[i].id==0x6f3c)sms=&temp->files[i];
     if(!sms){free(temp);return error(s,"No SIM SMS file");}
     n=2+1+((unsigned)sms->data[3]+1)/2+2+7+1+length*2; /* Complete TPDU, no EF status/SCA. */
-    data[3]=7;data[4]=0x91;data[10]=0xf1;data[0x1b]=(uint8_t)n;memcpy(data+0x1c,sms->data+2,n);free(temp);
+    data[3]=7;data[4]=0x91;data[10]=0xf1;data[0x1b]=(uint8_t)n;memcpy(data+0x1c,sms->data+2,n);
+    /* TP-DCS: UCS-2 (bit 3), explicit class (bit 4), class in bits 1..0.
+       Locate it after TP-OA and TP-PID, not at a fixed sender length. */
+    if(message_class>=0)data[0x1c+4+((unsigned)sms->data[3]+1)/2]=(uint8_t)(0x18|message_class);
+    free(temp);
     if(!cellular_queue(s,s->sr_task,0x1a0,data,sizeof(data)))return 0;++s->received_sms;*s->error=0;return 1;
 }
 static void restore(Cellular *s,Arm7 *c)
@@ -99,7 +108,7 @@ static int enter_event(Cellular *s,Arm7 *c,CellEvent *q)
 }
 static int valid_stack(Bus *bus,uint32_t base)
 {
-    unsigned i;uint64_t end=(uint64_t)base+CELL_NATIVE_STACK_BYTES;
+    unsigned i;uint64_t end=(uint64_t)base+CELL_NATIVE_ALLOC_BYTES;
     if(!base||(base&3)||end>UINT32_MAX)return 0;
     for(i=0;i<bus->count;++i){Region *r=&bus->regions[i];
         if(r->data&&!r->readonly&&!r->read&&!r->write&&base>=r->base&&end<=(uint64_t)r->base+r->size)return 1;
@@ -129,7 +138,7 @@ int cellular_advance(Cellular *s,Arm7 *c,int busy,int sim_present)
         /* The idle CPU SP may be above a parked task's live frames. Deep WAP
            callbacks must not borrow that stack: they overwrite its saved PSR
            and return addresses. Allocate a guest-owned stack once per boot. */
-        if(!s->native_stack){c->r[0]=CELL_NATIVE_STACK_BYTES;c->r[15]=s->alloc;s->stage=5;return 1;}
+        if(!s->native_stack){c->r[0]=CELL_NATIVE_ALLOC_BYTES;c->r[15]=s->alloc;s->stage=5;return 1;}
         return enter_event(s,c,q);
     }
     if(c->r[15]!=CELL_RETURN)return 1;

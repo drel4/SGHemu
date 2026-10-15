@@ -37,5 +37,25 @@ int main(void)
      app.m.clock.nanoseconds=5000000;ghost_capture();CHECK(target[0]==0x123456&&!app.ghost_pending);
      app.ghost_tick=GetTickCount()-75;ghost_frame();CHECK(ghost[0]!=0xffffff&&ghost[0]!=0x123456);
      app.m.pixels=app.ghost_target=app.ghost_pixels=NULL;app.ghosting=0;}
-    printf("GUI profiling/logging lifecycle: %u checks, %u failures.\n",checks,failures);return failures?1:0;
+    /* Hidden native controls: no firmware/DLL, no user settings or desktop input. */
+    {INITCOMMONCONTROLSEX common={sizeof(common),ICC_BAR_CLASSES};char state[80];RECT key,bar;
+     InitCommonControlsEx(&common);app.window=CreateWindowExA(0,"STATIC","SGHemu status fixture",
+        WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,0,0,300,650,NULL,NULL,GetModuleHandleA(NULL),NULL);
+     CHECK(app.window!=NULL);app.status=CreateWindowExA(0,STATUSCLASSNAMEA,"",WS_CHILD|WS_VISIBLE,
+        0,0,0,0,app.window,NULL,NULL,NULL);CHECK(app.status!=NULL);
+     for(i=0;i<SGH_MAX_KEYS;++i)app.buttons[i]=CreateWindowA("BUTTON","Key",WS_CHILD|WS_VISIBLE,
+        0,0,0,0,app.window,NULL,NULL,NULL);
+     SetMenu(app.window,make_menu());app.m.loaded=1;app.m.width=app.m.height=128;app.state="Paused";
+     for(i=1;i<=3;++i){app.zoom=i;layout();fit_window();GetWindowRect(app.buttons[20],&key);GetWindowRect(app.status,&bar);
+        CHECK(key.bottom<=bar.top&&bar.bottom>bar.top);}
+     app.running=0;status_refresh(1);SendMessageA(app.status,SB_GETTEXTA,0,(LPARAM)state);CHECK(!strcmp(state,"Paused"));
+     app.running=1;status_refresh(1);SendMessageA(app.status,SB_GETTEXTA,0,(LPARAM)state);CHECK(!strcmp(state,"Running"));
+     app.m.cpu.halted=1;status_refresh(1);SendMessageA(app.status,SB_GETTEXTA,0,(LPARAM)state);CHECK(!strcmp(state,"Stopped (CPU)"));
+     command(ID_MA_WATER);CHECK(app.ma_water&&app.m.ma3.water);
+     CHECK(GetMenuState(GetMenu(app.window),ID_MA_WATER,MF_BYCOMMAND)&MF_CHECKED);
+     SendMessageA(app.status,SB_GETTEXTA,0,(LPARAM)state);CHECK(strstr(state,"Water")!=NULL);
+     command(ID_MA_WATER);CHECK(!app.ma_water&&!app.m.ma3.water);
+     app.m.loaded=0;status_refresh(1);SendMessageA(app.status,SB_GETTEXTA,0,(LPARAM)state);CHECK(!strcmp(state,"No firmware"));
+     DestroyMenu(GetMenu(app.window));SetMenu(app.window,NULL);DestroyWindow(app.window);app.status=app.window=NULL;}
+    printf("GUI profiling/logging/status lifecycle: %u checks, %u failures.\n",checks,failures);return failures?1:0;
 }

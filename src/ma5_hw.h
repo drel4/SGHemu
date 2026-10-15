@@ -18,6 +18,7 @@ int ma5_hw_generate(Ma5Hw *hw, unsigned frames);
 void ma5_hw_set_mixer(Ma5Hw *hw,Ma5PcmMixer mixer,void *context);
 void ma5_hw_pump(Ma5Hw *hw);
 void ma5_hw_set_detune(Ma5Hw *hw,int enabled);
+void ma5_hw_set_water(Ma5Hw *hw,int enabled);
 void ma5_hw_pause(Ma5Hw *hw, int paused);
 void ma5_hw_reset(Ma5Hw *hw);
 void ma5_hw_parameter(Ma5Hw *hw,unsigned address,unsigned value);

@@ -1,12 +1,52 @@
 # C100 battery and charger simulation
 
 Cable detection uses a hardware GPIO input and interrupt. Voltage/temperature
-measurements use the ARM/DSP mailbox protocol. The shipped profile no longer
-calls battery firmware functions or intercepts their entry PCs.
+measurements use the ARM/DSP mailbox protocol. The XEDA2/XEDD1/XEDK1 profiles do
+not call battery firmware functions or intercept their entry PCs.
 
 The native **Emulation -> Battery** submenu accepts a percentage from 0 to 100
 and toggles the charging cable. Both settings persist in `state/emulator.ini`.
 CLI/probe equivalents are `--battery N` and `--charging`.
+
+## Charge completion / egg-hatching transition
+
+The current three bring-up profiles emulate charger completion separately from
+the battery ADC voltage. With the cable connected and battery set to 100%, the
+charger asserts its done input after **20 emulated seconds** of active charging.
+This settling delay lets the firmware initialize its filtered measurements; it
+is a provisional model delay, not a measured C100 charging/taper duration.
+Reset with the charger connected to enter the firmware's charging-only screen.
+Its own full-charge handler then stops charging and displays the hatched egg.
+
+XEDK1 `DetectFullCharge` (`011EBA98`) reads GPIO 34; `FullChargeState`
+(`011EAFD6`) changes the native charge mode. Charging enable is active-low GPIO
+39. The former class-3 identity selected a validator rejecting pins >=32.
+Ghidra's `sDriverTable` identifies the 40-pin `80500_31` implementation with
+compatibility IDs 13/14. The updated provisional identity selects class 13:
+ASIC `4800`, primary metal `0`, IROM selector `18`. This is an inferred firmware
+driver-selection fixture, **not a measured silicon ID**.
+
+That selector uses indirect internal-ROM calls. Read-only vectors at `00080030`
+and `0008003C` alias the existing caller-restricted unknown-version HLE and
+verified memcpy HLE. Missing vectors previously branched to zero during ordinary
+boot. No BIST success result, firmware instruction, mode byte or LCD resource is
+patched. Actual internal-ROM bytes and the physical chip revision remain unknown.
+
+```
+intc_aux=0x00041700
+gpio_port=0x0004029c,0x80
+charger_complete=0x0004029c,2,7,1,2,20000
+```
+
+The directive fields are port, done bit, active-low enable bit, interrupt bank
+(0 main / 1 auxiliary), IRQ bit and settling milliseconds. Done is E2, enable E7,
+and the completion edge latches auxiliary IRQ 2 even while masked. Done stays
+asserted when firmware disables charging, but clears on unplug or a percentage
+below 100%. Disabling charging before completion cancels the pending deadline.
+
+This is a bounded charger-controller subset, not complete analog/current/RF
+simulation. The slow native battery gauge is unchanged: it uses a 15-sample
+voltage filter plus hysteresis, rather than an immediate percentage-to-bars patch.
 
 ## Charger cable: hardware input, not firmware calls
 
@@ -31,7 +71,9 @@ at `013BB774` gives logical pin 10 data address `0004028E`, bit 2 and IRQ mask
 used for analysis only and is no longer part of the current charger config.
 The GPIO descriptor table also exists at `013BAA6C` in XEDA2 and `013BB6D0` in
 XEDD1: software tables move, while bank data-register addresses stay the same.
-This comparison does not mean those other firmwares boot completely.
+The current XEDA2/XEDD1/XEDK1 profiles have also passed fresh-state boot,
+cellular/SMS and charger-completion probes; matching this table alone would
+not establish that compatibility.
 
 `gpio_port` implements observed x16 masked data writes: low byte selects pins,
 high byte supplies their new output values. External inputs override the output

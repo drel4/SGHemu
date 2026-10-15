@@ -2,6 +2,11 @@
 
 ## Navigation sound (XEDK1)
 
+XEDA2 and XEDD1 now enable this same shared observer/renderer with their own
+verified entry PCs and tone-table address. See the
+[per-version table and integration checks](c100-firmware-compatibility.md).
+The addresses in the explanation below refer to XEDK1.
+
 `kid_keybeep` (`011443FC`) -> `audioStartTone` (`011D3DBA`) -> native tone
 manager/timers -> `TGSetToneD1` (`012AF30C`). Two note bytes select entries in
 `014C6440`: a Q15 oscillator cosine coefficient and an excitation/amplitude word.

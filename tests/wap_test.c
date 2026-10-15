@@ -60,6 +60,20 @@ int main(void)
         CHECK(wap_gateway_receive(&g,p,n,i*2,NULL,NULL,emit,f));CHECK(f->count==1);
         ack[1]=(uint8_t)(tid>>8);ack[2]=(uint8_t)tid;
         CHECK(wap_gateway_receive(&g,ack,3,i*2+1,NULL,NULL,emit,f));}
+    wap_gateway_close(&g);wap_gateway_init(&g);f->count=0;
+    {const uint8_t connect[]={0x0a,0,1,2,1,0x10,0,0};
+     uint8_t resume[]={0x0a,0,2,0x12,9,1,0};
+     CHECK(wap_gateway_receive(&g,connect,sizeof(connect),0,NULL,NULL,emit,f));
+     ack[1]=0;ack[2]=1;CHECK(wap_gateway_receive(&g,ack,3,1,NULL,NULL,emit,f));
+     CHECK(wap_gateway_receive(&g,resume,sizeof(resume),2,NULL,NULL,emit,f));
+     CHECK(f->count==2&&f->length[1]==9&&f->packet[1][3]==4&&f->packet[1][4]==0x20);
+     ack[2]=2;CHECK(wap_gateway_receive(&g,ack,3,3,NULL,NULL,emit,f));
+     n=request(p,3,"http://sghemu.local/");CHECK(wap_gateway_receive(&g,p,n,4,NULL,NULL,emit,f));
+     CHECK(f->packet[2][3]==4&&f->packet[2][4]==0x20);
+     resume[2]=4;resume[5]=2;CHECK(wap_gateway_receive(&g,resume,sizeof(resume),5,NULL,NULL,emit,f));
+     CHECK(f->packet[3][4]==0x40); /* Unknown session, not a spurious new connection. */
+     resume[2]=5;resume[5]=1;resume[6]=1;
+     CHECK(wap_gateway_receive(&g,resume,sizeof(resume),6,NULL,NULL,emit,f));CHECK(f->packet[4][4]==0x40);}
     wap_gateway_close(&g);free(f);
     printf("WAP gateway: %u checks, %u failures.\n",checks,failures);return failures?1:0;
 }

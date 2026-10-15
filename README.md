@@ -7,14 +7,20 @@ Windows 7 API/subsystem target; actual execution on Windows 7 is untested.
 
 [Download Windows x86 builds](https://github.com/drel4/SGHemu/releases).
 
-> **Firmware compatibility:** most functionality is currently available for
-> **C100XEDK1**. C100XEDA2 and C100XEDD1 have more limited bring-up support;
-> reaching standby does not mean they support the same features. SGHemu is
-> designed for multiple models, but other SGH models are not supported yet.
+> **Firmware compatibility:** **C100XEDK1** remains the best-tested version.
+> **C100XEDA2 / C100XEDD1** now also enable the shared battery/charger, GPIO LED,
+> low-power timer and firmware-matched cellular/SMS/tone bindings. WAP and import
+> bindings are present but not equally tested across versions; see the
+> [compatibility notes](docs/c100-firmware-compatibility.md). Other SGH models
+> are not supported yet.
 
 ## Phone output and appearance
 
-XEDK1 navigation/key tones now have an independent CPU/DSP PCM output, even
+The native status bar shows **Running / Paused / Stopped** and emulation speed.
+**100% means real-time speed**, measured from emulated time versus wall time;
+the display settles over half-second intervals and reads zero while paused.
+
+C100 navigation/key tones have an independent CPU/DSP PCM output, even
 without Yamaha DLLs. The program icon shows the native RGB service-LED color.
 **L&F -> LCD ghosting** toggles a saved LCD response effect;
 it does not alter guest pixels or screenshots. See
@@ -24,6 +30,14 @@ it does not alter guest pixels or screenshots. See
 to approximate the reported C100 detuning. It is off by default and saved;
 CPU navigation tones are unchanged. This clock-style effect also lengthens MA
 playback by about 0.72%; the exact hardware offset is not independently verified.
+
+**L&F -> Water (not accurate)** enables a deliberately fictional shorted-pin MA effect: unstable
+sequencer timing, voice/sample-data corruption bursts, bit-crushed/sample-held audio, dropouts
+and crackles. It affects Yamaha sound, not CPU navigation tones. It is off by
+default and session-only; a phone reset keeps the session's toggle. Turning it
+off restores normal timing/output processing, but reselect the ringtone or reset
+to clear corrupted queued pitch commands or uploaded samples. No firmware,
+saved phone data, packet addresses or packet lengths are corrupted.
 
 **File -> Logging** toggles `build/gui-unmapped.log`,
 `build/gui-ma3-traffic.log` and `build/gui-profile.log` while running, without resetting the phone.
@@ -243,10 +257,13 @@ Java TCP networking, WTLS or a full HTML browser. See
 [cellular and SIM details](docs/c100-cellular.md).
 
 The GUI remembers the last successfully opened firmware/model and automatically
-loads and runs it on subsequent launches. **Emulation -> Battery** (XEDK1) offers
+loads and runs it on subsequent launches. **Emulation -> Battery** offers
 an editable 0-100% level and a charging-cable toggle, persisted in
-`state/emulator.ini`. These drive native battery/charger callbacks; the voltage
-curve is provisional, not a calibrated hardware battery model.
+`state/emulator.ini`. These drive ADC/GPIO inputs on XEDA2/XEDD1/XEDK1; the phone
+samples and filters them, so its battery bars update later. Reset with the cable
+connected to see the charging screen. At 100%, charger completion after a
+20-emulated-second settling delay lets the firmware hatch the egg. The voltage
+curve and charger delay are provisional; see [battery details](docs/c100-battery.md).
 CPU/DSP navigation tones are implemented separately from MA synthesis. See
 [content import details](docs/c100-content-import.md).
 CLI: `--ma5-hw PATH`, optional `--audio-wav FILE` and `--audio-ticks-hz N`.

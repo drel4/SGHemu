@@ -1,4 +1,31 @@
 #include "battery.h"
+static void complete_level(Battery *b,unsigned level)
+{
+    gpio_port_input(b->complete_port,b->complete_bit,(int)level);
+    if(level!=b->complete){b->complete_intc->pending|=1u<<b->complete_irq;++b->complete_intc->events;}
+    b->complete=level;
+}
+static void charger_update(Battery *b)
+{
+    if(!b->complete_port)return;
+    if(!b->charging||b->percent<100){complete_level(b,0);b->complete_due=UINT64_MAX;return;}
+    /* Keep charge-done asserted after the firmware disables charging. A new
+       low battery/cable removal clears it. The enable pin is active-low. */
+    if(b->complete)return;
+    if(b->complete_port->output&(1u<<b->enable_bit)){b->complete_due=UINT64_MAX;return;}
+    if(b->complete_due==UINT64_MAX)b->complete_due=*b->nanoseconds+(uint64_t)b->complete_delay_ms*1000000u;
+}
+void battery_charger_output(void *context,unsigned mask,unsigned value,uint64_t ticks)
+{
+    Battery *b=context;(void)value;(void)ticks;
+    if(mask&(1u<<b->enable_bit))charger_update(b);
+}
+void battery_advance(Battery *b)
+{
+    if(!b->complete_port||*b->nanoseconds<b->complete_due)return;
+    b->complete_due=UINT64_MAX;
+    if(b->charging&&b->percent==100&&!(b->complete_port->output&(1u<<b->enable_bit)))complete_level(b,1);
+}
 static void restore(Battery *b,Arm7 *c)
 {
     uint64_t steps=c->instructions,cycles=c->cycles,clocks=c->clock_cycles;
@@ -21,6 +48,7 @@ void battery_set(Battery *b,unsigned percent,int charging)
         b->cable_pending=0;
     }else if(b->charging!=(unsigned)!!charging)b->cable_pending=1;
     b->percent=percent;b->charging=(unsigned)!!charging;
+    charger_update(b);
 }
 int battery_gpio(Battery *b,Arm7 *c)
 {

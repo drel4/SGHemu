@@ -15,6 +15,10 @@ set "LFLAGS="
 set "CFLAGS=/nologo /std:c17 /W4 /WX /Od /Zi /RTC1 /MD /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0601 /Isrc /Fobuild\ /Fdbuild\sghemu.pdb"
 if /i "%~1"=="release" set "CFLAGS=/nologo /std:c17 /W4 /WX /O2 /GL /MT /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0601 /Isrc /Fobuild\"
 if /i "%~1"=="release" set "LFLAGS=/LTCG"
+cl %CFLAGS% tests\ma_water_test.c /Febuild\ma_water_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01
+if errorlevel 1 exit /b 1
+build\ma_water_test.exe
+if errorlevel 1 exit /b 1
 cl %CFLAGS% tests\dsp_mailbox_test.c src\dsp_mailbox.c src\bus.c src\file.c /Febuild\dsp_mailbox_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01
 if errorlevel 1 exit /b 1
 build\dsp_mailbox_test.exe
@@ -163,4 +167,8 @@ if errorlevel 1 exit /b 1
 build\sim_test.exe
 if errorlevel 1 exit /b 1
 cl %CFLAGS% tests\c100_sim_test.c src\nvram.c src\firmware.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Febuild\c100_sim_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01 bcrypt.lib version.lib winmm.lib ws2_32.lib winhttp.lib
+if errorlevel 1 exit /b 1
+cl %CFLAGS% tests\c100_compat_test.c src\userfs.c src\nvram.c src\firmware.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Febuild\c100_compat_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01 bcrypt.lib version.lib winmm.lib ws2_32.lib winhttp.lib
+if errorlevel 1 exit /b 1
+cl %CFLAGS% tests\c100_charger_test.c src\userfs.c src\nvram.c src\firmware.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Febuild\c100_charger_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01 bcrypt.lib version.lib winmm.lib ws2_32.lib winhttp.lib
 exit /b %ERRORLEVEL%

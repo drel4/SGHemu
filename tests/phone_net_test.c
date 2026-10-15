@@ -53,6 +53,16 @@ int main(void)
     CHECK(net.lock_calls>=6);
     phone_net_set_mode(&net,0);CHECK(!net.runtime&&!net.opened[0]);
     cpu.r[15]=net.send_pdu;cpu.r[0]=0;CHECK(phone_net_hle(&net,cell,&cpu)&&cpu.r[0]==0xffffffffu);
+    /* Deferred URL event must outlive the firmware edit buffer. The native
+       event function still executes; only its borrowed argument is retained. */
+    {uint32_t retained;const char input[]="http://example.test/folder/";
+        phone_net_set_mode(&net,2);cell->native_stack=0x1000;
+        memcpy(ram+0x1300,input,sizeof(input));cpu.r[15]=net.post_event;cpu.r[0]=0xb;cpu.r[1]=0x6300;
+        CHECK(!phone_net_hle(&net,cell,&cpu));retained=cpu.r[1];CHECK(retained==0x5000);
+        memset(ram+0x1300,0,sizeof(input));CHECK(!memcmp(ram,input,sizeof(input)));
+        CHECK(!phone_net_hle(&net,cell,&cpu)&&cpu.r[1]==retained&&net.url_slot==1);
+        cpu.r[1]=0xffffffffu;CHECK(!phone_net_hle(&net,cell,&cpu)&&cpu.r[1]==0xffffffffu);
+    }
     CHECK(!bus->fault);phone_net_close(&net);bus_destroy(bus);free(bus);free(cell);
     printf("Native WAP bridge: %u checks, %u failures.\n",checks,failures);return failures?1:0;
 }

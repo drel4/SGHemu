@@ -47,6 +47,7 @@ static uint32_t register_read(void *ctx, uint32_t offset, unsigned width)
 static void register_write(void *ctx, uint32_t offset, unsigned width, uint32_t value)
 {
     Register32 *r = ctx;
+    if(r->irom_vector){bus_fault_access(r->bus,1,r->address+offset,width,value,"read-only internal-ROM vector");return;}
     uint32_t mask = width == 4 ? UINT32_MAX : ((1u << (width * 8)) - 1) << (offset * 8);
     r->value = (r->value & ~mask) | ((value << (offset * 8)) & mask);
 }
@@ -180,6 +181,12 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             uint32_t address;
             if (m->intc.attached || !number(value, &address) || !intc_attach(&m->intc, &m->bus, address)) { valid = 0; break; }
             continue;
+        }
+        if(!strcmp(key,"intc_aux")){
+            uint32_t address;
+            if(!m->intc.attached||m->intc_aux.attached||!number(value,&address)||
+                !intc_attach(&m->intc_aux,&m->bus,address)){valid=0;break;}
+            m->intc.secondary=&m->intc_aux;continue;
         }
         if (!strcmp(key, "unplaced_rom")) {
             if (m->unplaced_rom || !image_path(m->unplaced_path, sizeof(m->unplaced_path),
@@ -341,6 +348,20 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             for(j=0;j<3;++j)m->phone_io.led_pins[j]=pins[j];
             m->phone_io.hardware_led=1;port->output_changed=phone_io_gpio_write;port->output_context=&m->phone_io;
             phone_io_gpio_write(&m->phone_io,255,port->output,0);
+        } else if (!strcmp(key,"charger_complete")) {
+            uint32_t fields[5];unsigned j;char *part=comma;GpioPort *port=NULL;
+            for(j=0;j<m->gpio_count;++j)if(m->gpio_ports[j].base==base)port=&m->gpio_ports[j];
+            for(j=0;j<5;++j){char *next=strchr(part,',');if((j<4&&!next)||(j==4&&next)){valid=0;break;}
+                if(next)*next++=0;if(!number(part,&fields[j])){valid=0;break;}part=next;}
+            if(!valid||!port||port->output_changed||m->battery.complete_port||!m->clock.attached||
+                fields[0]>=8||fields[1]>=8||fields[0]==fields[1]||fields[2]>1||fields[3]>=32||
+                !(fields[2]?m->intc_aux.attached:m->intc.attached)){valid=0;break;}
+            m->battery.complete_port=port;m->battery.complete_intc=fields[2]?&m->intc_aux:&m->intc;
+            m->battery.complete_bit=fields[0];m->battery.enable_bit=fields[1];m->battery.complete_irq=fields[3];
+            m->battery.complete_delay_ms=fields[4];m->battery.complete_due=UINT64_MAX;
+            m->battery.nanoseconds=&m->clock.nanoseconds;
+            gpio_port_input(port,fields[0],0);port->output_changed=battery_charger_output;port->output_context=&m->battery;
+            battery_set(&m->battery,m->battery.percent,(int)m->battery.charging);
         } else if (!strcmp(key,"charger_input")) {
             if(!m->gpio_count||!m->intc.attached||m->battery.charger_port||base>=8||
                 !number(comma,&size)||size>=32){valid=0;break;}
@@ -431,10 +452,12 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
         } else if (!strcmp(key, "irq_gate")) {
             if ((base & 1) || m->irq_gate_mask || !number(comma, &size) || !size || size > 65535) { valid = 0; break; }
             m->irq_gate_address = base; m->irq_gate_mask = size;
-        } else if (!strcmp(key, "register32")) {
+        } else if (!strcmp(key, "register32")||!strcmp(key,"irom_vector")) {
             Register32 *r;
             if ((base & 3) || !number(comma, &size) || m->register_count == SGH_MAX_IDENTITIES) { valid = 0; break; }
             r = &m->registers[m->register_count++]; r->bus = &m->bus; r->address = base; r->value = size;
+            r->irom_vector=!strcmp(key,"irom_vector");
+            if(r->irom_vector&&(base<0x80000||base>=0x82000||!(size&1))){valid=0;break;}
             if (!bus_device(&m->bus, base, 4, register_read, register_write, r)) { valid = 0; break; }
         } else if (!strcmp(key, "ram")) {
             if (!number(comma, &size) || !size || size > 64u * 1024 * 1024) { valid = 0; break; }
@@ -477,6 +500,9 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             }
         }
     }
+    if(valid){unsigned i,j;for(i=0;i<m->register_count;++i)if(m->registers[i].irom_vector){
+        for(j=0;j<m->irom.count;++j)if(m->irom.services[j].address==(m->registers[i].value&~1u))break;
+        if(j==m->irom.count)valid=0;}}
     if(valid&&(m->cellular.ready||m->cellular.sms_send||m->network.txn_start||m->cellular.poll)){
         unsigned i,j;uint32_t code[]={m->cellular.ready,m->cellular.alloc,m->cellular.release,
             m->cellular.send_ui,m->cellular.dial,m->cellular.accept,m->cellular.disconnect,
@@ -620,6 +646,7 @@ int machine_step(Machine *m, int continuation)
     if (*m->ma3.error) { m->cpu.halted=1; m->cpu.error=m->ma3.error; return 0; }
     if(m->lp_timer.attached&&(m->clock.nanoseconds>=m->lp_timer.next_event||
         ((m->intc.enabled&m->lp_timer.cal_mask)!=m->lp_timer.observed_enabled)))lp_timer_advance(&m->lp_timer);
+    if(m->battery.complete_port&&m->clock.nanoseconds>=m->battery.complete_due)battery_advance(&m->battery);
     intc_advance_time(&m->intc, &m->cpu,m->periodic_time?m->clock.nanoseconds:m->cpu.cycles);
     /* Sample the hardware latch, not a synthetic guest bus access. Pending
        sources remain latched while firmware critical sections close the gate. */
@@ -638,7 +665,7 @@ int machine_step(Machine *m, int continuation)
             uint32_t pc=m->cpu.r[15];PhoneNetwork *n=&m->network;Cellular *s=&m->cellular;
             /* Keep packet/event stack frames off the interpreter's normal path. */
             if((m->cpu.cpsr&ARM_T)&&n->txn_start&&
-                (pc==n->txn_start||pc==n->send_pdu||pc==n->recv_pdu||pc==n->bearer_state))
+                (pc==n->txn_start||pc==n->send_pdu||pc==n->recv_pdu||pc==n->bearer_state||pc==n->post_event))
                 hle=phone_net_hle(n,s,&m->cpu);
             if(!hle&&(m->cpu.cpsr&ARM_T)&&s->enabled&&s->ready&&
                 (pc==s->radio_select||pc==s->name_lookup||pc==s->dial||pc==s->accept||

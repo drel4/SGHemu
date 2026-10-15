@@ -6,6 +6,8 @@
 #define CELL_EVENT_BYTES 1100
 #define CELL_CALLBACK 0xffffffffu
 #define CELL_NATIVE_STACK_BYTES 16384u
+#define CELL_NATIVE_URL_BYTES 4096u
+#define CELL_NATIVE_ALLOC_BYTES (CELL_NATIVE_STACK_BYTES+CELL_NATIVE_URL_BYTES)
 #define CELL_IDLE 0
 #define CELL_TO_PHONE 1
 #define CELL_FROM_PHONE 2
@@ -28,6 +30,8 @@ int cellular_set_network(Cellular *s,Bus *bus,int enabled,const char *name);
 int cellular_call(Cellular *s,Bus *bus,const char *number);
 int cellular_answer(Cellular *s,int accept);
 int cellular_sms(Cellular *s,const char *number,const uint16_t *text,unsigned length,const uint8_t scts[7]);
+/* -1: unspecified (normal SMS); 0..3: GSM message class. */
+int cellular_sms_class(Cellular *s,const char *number,const uint16_t *text,unsigned length,const uint8_t scts[7],int message_class);
 int cellular_queue(Cellular *s,uint32_t target,uint32_t message,const void *bytes,unsigned length);
 int cellular_advance(Cellular *s,Arm7 *c,int busy,int sim_present);
 int cellular_hle(Cellular *s,Arm7 *c);

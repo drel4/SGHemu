@@ -2,9 +2,10 @@
 
 ## User controls
 
-The C100 XEDK1 bring-up profile supplies firmware-specific bindings. Other
-models/firmwares must have their own recovered bindings before these controls
-are enabled; addresses are not shared across firmware versions.
+The C100 XEDK1, XEDA2 and XEDD1 bring-up profiles supply separately recovered
+firmware-specific bindings. Other models/firmwares need their own bindings
+before these controls are enabled; addresses are not shared across versions.
+See [compatibility verification and remaining limits](c100-firmware-compatibility.md).
 
 **Emulation -> Cellular** provides:
 
@@ -163,6 +164,8 @@ The native browser event loop (`01222BB4`) provides an additional safe callback
 injection point.
 
 Injected calls use a dedicated 16-KiB stack allocated by the guest once per boot.
+The same allocation now reserves an additional 4 KiB, outside that stack, for
+deferred URL-event strings; see [URL lifetime and session Resume fixes](wap-url-resume-fix.md).
 Borrowing the idle CPU stack overwrote parked task frames during deep WAP receive
 callbacks, freezing the phone when previewing downloaded MMFs. IRQ delivery is
 deferred during these short native transactions; device time and interrupt latches

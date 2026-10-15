@@ -14,19 +14,26 @@ static LRESULT CALLBACK cell_editor_proc(HWND window,UINT message,WPARAM wparam,
         SendMessageA(GetDlgItem(window,10),EM_SETLIMITTEXT,kind==1?30:30,0);
         if(kind==2){CreateWindowA("STATIC","Message (up to 70 characters):",WS_CHILD|WS_VISIBLE,12,72,370,20,window,NULL,NULL,NULL);
             CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL,12,96,370,120,window,(HMENU)11,NULL,NULL);
-            SendMessageW(GetDlgItem(window,11),EM_SETLIMITTEXT,70,0);}
-        CreateWindowA("BUTTON",kind==1?"Apply":kind==2?"Send SMS":"Call phone",WS_CHILD|WS_VISIBLE|WS_TABSTOP,12,kind==2?230:78,160,28,window,(HMENU)1,NULL,NULL);
-        CreateWindowA("BUTTON","Cancel",WS_CHILD|WS_VISIBLE|WS_TABSTOP,184,kind==2?230:78,100,28,window,(HMENU)2,NULL,NULL);return 0;
+            SendMessageW(GetDlgItem(window,11),EM_SETLIMITTEXT,70,0);
+            CreateWindowA("STATIC","SMS level:",WS_CHILD|WS_VISIBLE,12,230,80,20,window,NULL,NULL,NULL);
+            {HWND levels=CreateWindowA("COMBOBOX","",WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,98,226,284,160,window,(HMENU)12,NULL,NULL);
+                static const char *const names[]={"Normal (no class)","Class 0 - Flash","Class 1 - Phone","Class 2 - SIM","Class 3 - Terminal"};unsigned i;
+                for(i=0;i<5;++i)SendMessageA(levels,CB_ADDSTRING,0,(LPARAM)names[i]);
+                SendMessageA(levels,CB_SETCURSEL,0,0);}}
+        CreateWindowA("BUTTON",kind==1?"Apply":kind==2?"Send SMS":"Call phone",WS_CHILD|WS_VISIBLE|WS_TABSTOP,12,kind==2?266:78,160,28,window,(HMENU)1,NULL,NULL);
+        CreateWindowA("BUTTON","Cancel",WS_CHILD|WS_VISIBLE|WS_TABSTOP,184,kind==2?266:78,100,28,window,(HMENU)2,NULL,NULL);return 0;
     }
     if(message==WM_COMMAND&&LOWORD(wparam)==1){char value[64];int ok=0;GetDlgItemTextA(window,10,value,sizeof(value));emu_lock();
         if(app.cell_editor_kind==1){ok=cellular_set_network(&app.m.cellular,&app.m.bus,app.cell_enabled,value);
             if(ok){strcpy(app.cell_network,value);cell_save_settings();}}
         else if(app.cell_editor_kind==3)ok=cellular_call(&app.m.cellular,&app.m.bus,value);
-        else {WCHAR text[71];SYSTEMTIME now;TIME_ZONE_INFORMATION zone;DWORD zone_id;LONG bias;uint8_t timestamp[7];unsigned parts[7],i;GetDlgItemTextW(window,11,text,71);GetLocalTime(&now);zone_id=GetTimeZoneInformation(&zone);bias=zone.Bias+(zone_id==TIME_ZONE_ID_DAYLIGHT?zone.DaylightBias:zone.StandardBias);
+        else {WCHAR text[71];SYSTEMTIME now;TIME_ZONE_INFORMATION zone;DWORD zone_id;LONG bias;uint8_t timestamp[7];unsigned parts[7],i;
+            int selection=(int)SendDlgItemMessageA(window,12,CB_GETCURSEL,0,0);
+            GetDlgItemTextW(window,11,text,71);GetLocalTime(&now);zone_id=GetTimeZoneInformation(&zone);bias=zone.Bias+(zone_id==TIME_ZONE_ID_DAYLIGHT?zone.DaylightBias:zone.StandardBias);
             parts[0]=now.wYear%100;parts[1]=now.wMonth;parts[2]=now.wDay;parts[3]=now.wHour;parts[4]=now.wMinute;parts[5]=now.wSecond;parts[6]=(unsigned)((bias<0?-bias:bias)/15);
             for(i=0;i<7;++i)timestamp[i]=(uint8_t)(((parts[i]%10)<<4)|(parts[i]/10));
             if(bias>0)timestamp[6]|=8;
-            ok=cellular_sms(&app.m.cellular,value,(const uint16_t *)text,(unsigned)wcslen(text),timestamp);}
+            ok=cellular_sms_class(&app.m.cellular,value,(const uint16_t *)text,(unsigned)wcslen(text),timestamp,selection>0?selection-1:-1);}
         if(ok){app.running=1;app.state="Running";}else MessageBoxA(window,app.m.cellular.error,"SGHemu - Cellular",MB_OK|MB_ICONINFORMATION);
         update_ui();emu_unlock();if(ok)DestroyWindow(window);return 0;
     }
@@ -38,7 +45,7 @@ static void cell_open_editor(int kind)
 {
     if(app.cell_editor){SetForegroundWindow(app.cell_editor);return;}app.cell_editor_kind=kind;
     CreateWindowExA(0,"SGHemuCellular",kind==1?"SGHemu - Network name":kind==2?"SGHemu - Send SMS to phone":"SGHemu - Call phone",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_VISIBLE,
-        CW_USEDEFAULT,CW_USEDEFAULT,410,kind==2?310:150,app.window,NULL,GetModuleHandleA(NULL),NULL);
+        CW_USEDEFAULT,CW_USEDEFAULT,410,kind==2?350:150,app.window,NULL,GetModuleHandleA(NULL),NULL);
 }
 static LRESULT CALLBACK call_proc(HWND window,UINT message,WPARAM wparam,LPARAM lparam)
 {

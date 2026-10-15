@@ -1,6 +1,7 @@
 #include "ma5_hw.h"
 #include "adpcm.h"
 #include "ma_detune.h"
+#include "ma_water.h"
 #include "file.h"
 #include <windows.h>
 #include <mmsystem.h>
@@ -37,6 +38,7 @@ struct Ma5Hw {
     Ma5PcmMixer mixer;void *mixer_context;
     const uint8_t *packet;unsigned packet_size;
     MaDetune detune;
+    MaWater water;
 };
 static volatile LONG occupied;
 static int native_u32(uintptr_t address,uint32_t *value)
@@ -208,6 +210,7 @@ static int generate(Ma5Hw *h,unsigned frames)
     if(!synthesize(h,left+1,right+1,frames))return 0;
     if(left[0]!=12345||left[frames+1]!=12345||right[0]!=12345||right[frames+1]!=12345)return 0;
     count=ma_detune_pcm(&h->detune,left+1,right+1,frames,out_left,out_right,512);if(!count)return 0;
+    ma_water_pcm(&h->water,out_left,out_right,count);
     if(h->mixer)h->mixer(h->mixer_context,out_left,out_right,count);
     /* Detuned blocks can straddle a 480-frame output slot. Never discard a
        partial block or reset interpolation history at short DLL boundaries. */
@@ -297,6 +300,7 @@ static unsigned __stdcall worker(void *arg)
             for(i=0;i<h->packet_size;++i)h->write_data(h->packet[i]);break;
         case 17:h->generate(NULL,NULL,0);break;
         case 18:ma_detune_set(&h->detune,h->arg!=0);break;
+        case 19:ma_water_set(&h->water,h->arg!=0);break;
         case 13: {
             unsigned address=h->arg&0xfffff,bytes=(h->arg&0x100000)?3:address>=128?2:1;
             h->write_status(3);
@@ -371,6 +375,7 @@ void ma5_hw_set_mixer(Ma5Hw *h,Ma5PcmMixer mixer,void *context)
 {if(h){h->mixer=mixer;h->mixer_context=context;}}
 void ma5_hw_pump(Ma5Hw *h){(void)command(h,17,0);}
 void ma5_hw_set_detune(Ma5Hw *h,int enabled){(void)command(h,18,(unsigned)(enabled!=0));}
+void ma5_hw_set_water(Ma5Hw *h,int enabled){(void)command(h,19,(unsigned)(enabled!=0));}
 void ma5_hw_pause(Ma5Hw *h,int paused){(void)command(h,7,(unsigned)(paused!=0));}
 void ma5_hw_reset(Ma5Hw *h){(void)command(h,6,0);}
 void ma5_hw_parameter(Ma5Hw *h,unsigned address,unsigned value){(void)command(h,9,(address<<8)|(value&255));}

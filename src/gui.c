@@ -19,6 +19,7 @@
 #include "content.h"
 #include "host.h"
 #include "key_text.h"
+#include "emu_speed.h"
 #define ID_OPEN_MODEL 100
 #define ID_OPEN_ROM 101
 #define ID_RESET 102
@@ -59,6 +60,7 @@
 #define ID_BATTERY_CABLE 141
 #define ID_LCD_GHOSTING 150
 #define ID_MA_DETUNE 151
+#define ID_MA_WATER 152
 #define ID_PATTERN 120
 #define ID_ZOOM1 121
 #define ID_ZOOM2 122
@@ -78,7 +80,11 @@ typedef struct {
     NvramStore storage;
     char sim_storage[1100];
     DWORD nv_checkpoint;
-    HWND window, buttons[SGH_MAX_KEYS], diagnostics, diagnostic_edit;
+    HWND window, buttons[SGH_MAX_KEYS], diagnostics, diagnostic_edit,status;
+    int status_height,status_running,status_clock,status_water;
+    uint64_t status_guest;
+    char status_state[48];
+    EmuSpeed speed;
     HWND fs_window,fs_list,fs_status,fs_queue,fs_left_label,fs_right_label;
     ImportItem imports[IMPORT_QUEUE_MAX];unsigned import_count,import_current;
     int import_running,fs_system;
@@ -110,6 +116,7 @@ typedef struct {
     int cell_editor_kind,cell_enabled;unsigned gsm_mode,cell_revision;char cell_network[31];
     int ghosting;
     int ma_detune;
+    int ma_water; /* Session-only: deliberately damaged sound is never a startup default. */
     uint32_t *ghost_pixels,*ghost_target,*display_pixels;unsigned display_width,display_height;
     uint64_t ghost_writes,ghost_commands,ghost_changed_at;
     int ghost_pending;
@@ -145,6 +152,31 @@ static void emu_lock(void)
 }
 static void emu_unlock(void) { ReleaseMutex(emu_mutex); }
 static void update_ui(void);
+/* Called only by the GUI thread. With fresh=0 it uses its own last snapshot,
+   so speed can fall to zero even if the emulation thread holds the mutex. */
+static void status_refresh(int fresh)
+{
+    LARGE_INTEGER now,frequency;char text[80],speed[32];int running;
+    if(!app.status)return;
+    QueryPerformanceCounter(&now);QueryPerformanceFrequency(&frequency);
+    if(fresh){
+        running=app.running&&app.m.loaded&&!app.m.cpu.halted;
+        if(running!=app.status_running)memset(&app.speed,0,sizeof(app.speed));
+        app.status_running=running;app.status_clock=app.m.clock.attached;
+        app.status_guest=app.m.clock.nanoseconds;app.status_water=app.ma_water;
+        snprintf(app.status_state,sizeof(app.status_state),"%s",!app.m.loaded?"No firmware":
+            app.m.cpu.halted?"Stopped (CPU)":running?"Running":
+            app.state&&(strstr(app.state,"stopped")||strstr(app.state,"failed"))?"Stopped":"Paused");
+    }
+    emu_speed_sample(&app.speed,(uint64_t)now.QuadPart,(uint64_t)frequency.QuadPart,
+        app.status_guest,app.status_running&&app.status_clock);
+    snprintf(text,sizeof(text),"%s%s",app.status_state,app.status_water?" | Water":"");
+    if(!app.status_running)strcpy(speed,"0.0%");
+    else if(!app.speed.valid||!app.status_clock)strcpy(speed,"--%");
+    else snprintf(speed,sizeof(speed),"%.1f%%",app.speed.percent);
+    SendMessageA(app.status,SB_SETTEXTA,0,(LPARAM)text);
+    SendMessageA(app.status,SB_SETTEXTA,1,(LPARAM)speed);
+}
 static int load_model(void);
 static int save_storage(void);
 #define filesystem_proc filesystem_proc_unlocked
@@ -296,6 +328,7 @@ static void update_ui(void)
     CheckMenuItem(menu, ID_SIM, MF_BYCOMMAND | (app.m.sim.present ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu,ID_LCD_GHOSTING,MF_BYCOMMAND|(app.ghosting?MF_CHECKED:MF_UNCHECKED));
     CheckMenuItem(menu,ID_MA_DETUNE,MF_BYCOMMAND|(app.ma_detune?MF_CHECKED:MF_UNCHECKED));
+    CheckMenuItem(menu,ID_MA_WATER,MF_BYCOMMAND|(app.ma_water?MF_CHECKED:MF_UNCHECKED));
     phone_io_pause(&app.m.phone_io,!app.running);
     CheckMenuItem(menu, ID_AUDIO, MF_BYCOMMAND | (app.audio_enabled ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, ID_HIGH_PRIORITY, MF_BYCOMMAND | (app.high_priority ? MF_CHECKED : MF_UNCHECKED));
@@ -325,7 +358,7 @@ static void update_ui(void)
     EnableMenuItem(menu, ID_STEP, MF_BYCOMMAND | (app.m.loaded && !app.running && !app.m.cpu.halted ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(menu, ID_NV_LOAD, MF_BYCOMMAND | (app.m.loaded && app.m.nvram_data ? MF_ENABLED : MF_GRAYED));
     for (i = 0; i < SGH_MAX_KEYS; ++i) EnableWindow(app.buttons[i], app.m.loaded);
-    update_diagnostics();
+    update_diagnostics();status_refresh(1);
 }
 static void release_keys(void)
 {
@@ -384,6 +417,11 @@ static void layout(void)
     RECT client;
     int width, screen, grid_y, button_width, i;
     GetClientRect(app.window, &client); width = client.right;
+    if(app.status){RECT bar;int parts[2];
+        SendMessageA(app.status,WM_SIZE,0,0);GetWindowRect(app.status,&bar);
+        app.status_height=bar.bottom-bar.top;
+        parts[0]=width>160?width-90:width/2;parts[1]=-1;
+        SendMessageA(app.status,SB_SETPARTS,2,(LPARAM)parts);}
     screen = (int)(app.m.loaded ? app.m.width : 128) * (int)app.zoom;
     app.lcd.left = (width - screen) / 2; app.lcd.top = 0;
     app.lcd.right = app.lcd.left + screen;
@@ -399,7 +437,7 @@ static void fit_window(void)
     RECT rect, current, work;
     int left, top;
     int width = (int)(app.m.loaded ? app.m.width : 128) * (int)app.zoom;
-    int height = (int)(app.m.loaded ? app.m.height : 128) * (int)app.zoom + 292;
+    int height = (int)(app.m.loaded ? app.m.height : 128) * (int)app.zoom + 292 + app.status_height;
     if (width < 256) width = 256;
     SetRect(&rect, 0, 0, width, height);
     AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, TRUE, 0);
@@ -562,6 +600,7 @@ static int load_model(void)
         if(!phone_io_open(&app.m.phone_io,!app.m.phone_io.mixed,NULL))app.state="CPU tone output unavailable";
         if(app.m.phone_io.mixed)ma5_hw_set_mixer(app.m.ma3.hw,phone_io_mix,&app.m.phone_io);
         ma5_hw_set_detune(app.m.ma3.hw,app.ma_detune&&strstr(app.m.name,"C100")!=NULL);
+        ma3_set_water(&app.m.ma3,app.ma_water);memset(&app.speed,0,sizeof(app.speed));
         update_led_icon();}
     return app.m.loaded && !app.m.cpu.halted;
 }
@@ -779,6 +818,8 @@ static void command(unsigned id)
         app.ma_detune=!app.ma_detune;
         ma5_hw_set_detune(app.m.ma3.hw,app.ma_detune&&strstr(app.m.name,"C100")!=NULL);
         CreateDirectoryA("state",NULL);WritePrivateProfileStringA("look_and_feel","c100_ma_detune",app.ma_detune?"1":"0",app.emulator_settings);break;
+    case ID_MA_WATER:
+        app.ma_water=!app.ma_water;ma3_set_water(&app.m.ma3,app.ma_water);break;
     case ID_SIM:
         if (app.m.sim.attached && save_storage()) {
             int running=app.running,previous=app.sim_override;
@@ -848,6 +889,7 @@ static HMENU make_menu(void)
     AppendMenuA(file, MF_STRING, ID_OPEN_FOLDER, "Open &firmware folder...\tCtrl+O");
     HMENU look=CreatePopupMenu();
     AppendMenuA(look,MF_STRING,ID_LCD_GHOSTING,"LCD ghosting");
+    AppendMenuA(look,MF_STRING,ID_MA_WATER,"Water (not accurate)");
     AppendMenuA(look,MF_STRING,ID_MA_DETUNE,"C100 MA detune (-12.5 cents)");
     AppendMenuA(file, MF_STRING, ID_OPEN_MODEL, "Open &model config (advanced)...");
     AppendMenuA(file, MF_STRING, ID_NV_LOAD, "Import NVM snapshot and reset...");
@@ -889,6 +931,9 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
         unsigned i;
         app.window = window;
         app.font = CreateFontA(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
+        app.status=CreateWindowExA(0,STATUSCLASSNAMEA,"",WS_CHILD|WS_VISIBLE,0,0,0,0,
+            window,NULL,NULL,NULL);
+        SendMessageA(app.status,WM_SETFONT,(WPARAM)app.font,TRUE);layout();
         for (i = 0; i < SGH_MAX_KEYS; ++i) {
             app.buttons[i] = CreateWindowA("BUTTON", key_names[i], WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, window, (HMENU)(UINT_PTR)(ID_KEY_BASE + i), NULL, NULL);
             SendMessageA(app.buttons[i], WM_SETFONT, (WPARAM)app.font, TRUE); SetWindowSubclass(app.buttons[i], button_proc, i, 0);
@@ -904,7 +949,7 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
     if (message == WM_EXITMENULOOP) { app.menu_active = 0; return 0; }
     if (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) { release_keys(); update_ui(); }
     if (message == WM_TIMER) {
-        fs_tick();cell_tick();update_led_icon();if(app.ghosting){ghost_frame();InvalidateRect(window,&app.lcd,FALSE);}
+        status_refresh(1);fs_tick();cell_tick();update_led_icon();if(app.ghosting){ghost_frame();InvalidateRect(window,&app.lcd,FALSE);}
         if(app.display_pixels){const uint32_t *frame=app.ghosting&&app.ghost_pixels?app.ghost_pixels:app.pattern?app.test_pixels:app.m.pixels;
             if(frame)memcpy(app.display_pixels,frame,(size_t)app.display_width*app.display_height*sizeof(uint32_t));}
         if(app.host_time&&app.m.rtc.attached&&GetTickCount()-app.time_checkpoint>=1000){
@@ -1009,7 +1054,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
        app.m, so it must not wait for the emulation thread. */
     if(message==WM_ERASEBKGND)return 1;
     if(message==WM_PAINT)return window_message(window,message,wparam,lparam,&handled);
-    if(message==WM_TIMER&&WaitForSingleObject(emu_mutex,2)!=WAIT_OBJECT_0){if(profile_enabled)InterlockedIncrement(&profile_skipped);return 0;}
+    if(message==WM_TIMER&&WaitForSingleObject(emu_mutex,2)!=WAIT_OBJECT_0){
+        if(profile_enabled)InterlockedIncrement(&profile_skipped);status_refresh(0);return 0;}
     if(message==WM_TIMER){result=window_message(window,message,wparam,lparam,&handled);emu_unlock();return result;}
     if (!window_needs_lock(message)) return DefWindowProcA(window, message, wparam, lparam);
     emu_lock(); result = window_message(window, message, wparam, lparam, &handled); emu_unlock();

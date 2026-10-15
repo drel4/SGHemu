@@ -10,6 +10,7 @@ static unsigned memory_address,memory_full,memory_value;
 static unsigned native_selector,native_low,native_high;
 static unsigned sample_cursor,sample_voice;
 static unsigned changed_address,changed_length,led_token;
+static int water_enabled;
 #define CHECK(x) do { ++checks; if(!(x)){fprintf(stderr,"MA-3 line %d: %s\n",__LINE__,#x);exit(1);} } while(0)
 Ma5Hw *ma5_hw_open(const char *d,const char *w,int s,char *e,unsigned n)
 { (void)d;(void)w;(void)s;(void)e;(void)n;return &mock; }
@@ -24,10 +25,11 @@ void ma5_hw_fifo(Ma5Hw *h,unsigned selector,const uint8_t *bytes,unsigned length
 void ma5_hw_parameter(Ma5Hw *h,unsigned a,unsigned v){(void)h;parameter_address=a;parameter_value=v;}
 unsigned ma5_hw_memory(Ma5Hw *h,unsigned a,int full){(void)h;memory_address=a;memory_full=(unsigned)full;return memory_value;}
 unsigned ma5_hw_pcm_cursor(Ma5Hw *h,unsigned voice){(void)h;sample_voice=voice;return sample_cursor;}
-void ma5_hw_register(Ma5Hw *h,unsigned r,unsigned v,unsigned bank){(void)h;(void)bank;CHECK(r<64);registers[r]=v;}
+void ma5_hw_register(Ma5Hw *h,unsigned r,unsigned v,unsigned bank){(void)h;(void)bank;CHECK(r<64);registers[r]=v;native_selector=4;}
 int ma5_hw_generate(Ma5Hw *h,unsigned n){(void)h;frames+=n;return 1;}
 unsigned ma5_hw_led_token(Ma5Hw *h){(void)h;return led_token;}
 void ma5_hw_pump(Ma5Hw *h){(void)h;++pumps;}
+void ma5_hw_set_water(Ma5Hw *h,int enabled){(void)h;water_enabled=enabled;}
 int ma5_hw_irq(Ma5Hw *h){unsigned result=irq;(void)h;irq=0;return (int)result;}
 static Bus bus;
 static void ss(unsigned v){bus_write(&bus,0x200000,1,v);}
@@ -185,6 +187,51 @@ int main(void)
           CHECK(m.fractional+(t-m.last_tick)*48000==fraction);
         }
       }
+    }
+    {unsigned original,changes=0,fast=0,slow=0;uint64_t t=m.last_tick;
+        count=0;ss(2);data(0x5e);data(0x82);data(1);data(0xc0);
+        original=(registers[0x23]<<6)|(registers[0x24]>>2);CHECK(original>0);
+        ma3_set_water(&m,1);CHECK(m.water&&water_enabled);
+        for(i=0;i<100;++i){unsigned divider;ss(i%2?0:2);t+=m.ticks_hz/2;ma3_advance(&m,t);
+            CHECK(native_selector==(m.selector&63));
+            divider=(registers[0x23]<<6)|(registers[0x24]>>2);
+            CHECK(divider>=64&&divider<=16383);if(divider!=original)++changes;
+            if(m.water_scale<65)++fast;if(m.water_scale>175)++slow;}
+        CHECK(changes>50&&m.water_faults>50);CHECK(fast&&slow);
+        /* Voice payloads change: framing and the host's clean
+           parameter readback survive. No length/address corruption. */
+        for(i=0;i<100;++i){ss(2);data(0x82);data(0xd5);
+            CHECK(parameter_address==2&&(parameter_value&0xc0)==0xc0);
+            CHECK(read_parameter(2)==0x55);}
+        {unsigned errors=0;
+            count=0;ss(2);data(0);data(0);data(0x80);data(0);data(0xa0);
+            CHECK(m.packet_length==4096&&m.packet_address==0);
+            CHECK(values[count-2]==0&&values[count-1]==0xa0);
+            for(i=0;i<4096;++i){unsigned delta;count=0;data(0x55);
+                CHECK(count==1&&ports[0]==1);delta=values[0]^0x55;
+                CHECK(!delta||delta==1||delta==2||delta==4||delta==8);
+                if(delta)++errors;}
+            CHECK(errors>0&&errors<200);CHECK(m.packet_length==0&&changed_length==4096);
+            CHECK(m.parameter_ram[0]==0x55);
+        }
+        {unsigned expression_changes=0;
+            for(i=0;i<100;++i){count=0;ss(2);data(0x84);data(0xd5);
+                CHECK(parameter_address==4&&(parameter_value&0xc0)==0xc0);
+                if(parameter_value!=0xd5)++expression_changes;}
+            CHECK(expression_changes>0);CHECK(m.parameter_ram[4]==0x55);
+            for(i=0;i<100;++i){count=0;ss(2);data(0x85);data(0xd5);
+                CHECK(parameter_address==5&&parameter_value==0xd5);}
+            /* Delayed RAM length bytes are not sample data. Force a burst
+               across the packet to prove only its payload changes. */
+            m.water_sample_burst=12;count=0;
+            ss(1);data(0x80);data(0);data(0);data(0x80);data(0x84);
+            data(0x55);data(0x55);data(0x55);data(0x55);
+            CHECK(values[count-5]==0x84);
+            for(i=1;i<=4;++i)CHECK(values[count-i]!=0x55);
+        }
+        ma3_set_water(&m,0);CHECK(!m.water&&!water_enabled);
+        CHECK(((registers[0x23]<<6)|(registers[0x24]>>2))==original);
+        ss(2);data(0x82);data(0xd5);CHECK(parameter_value==0xd5);
     }
     ma3_destroy(&m);CHECK(!m.hw);bus_destroy(&bus);
     printf("MA-3: %u checks passed\n",checks);return 0;

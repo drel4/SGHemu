@@ -21,12 +21,19 @@ typedef struct {
     uint64_t led_tick,led_events;
     unsigned block_frames; /* PCM generated per DLL step; 0 means 480 (10 ms) */
     FILE *trace; char error[256];
+    int water;
+    uint32_t water_rng;
+    unsigned water_sample_burst;
+    unsigned sequence_divider,water_scale,sequence_valid;
+    uint64_t water_next,water_faults;
 } Ma3;
 int ma3_attach(Ma3 *m,Bus *bus,Intc *intc,uint32_t base,uint32_t irq_mask,uint32_t sequence_quantum_ns);
 int ma3_enable(Ma3 *m,const char *dll,const char *wav,int speakers,uint32_t ticks_hz);
 /* Smaller blocks make chip IRQs and the PCM cursor track emulated time more
    closely (resolution = block / 48 kHz). Must divide 480 and be at least 16. */
 int ma3_set_block(Ma3 *m,unsigned frames);
+/* Session-only fictional MA faults; packet framing and RAM addresses stay valid. */
+void ma3_set_water(Ma3 *m,int enabled);
 void ma3_advance(Ma3 *m,uint64_t ticks);
 void ma3_destroy(Ma3 *m);
 #endif

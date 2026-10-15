@@ -24,9 +24,9 @@ int main(void)
     c.instructions=300000000;c.r[3]=0x12345678;c.r[13]=0x8800;original=c;
     CHECK(cellular_queue(s,0,0x163,data,3));
     for(i=0;i<100;++i){CHECK(cellular_advance(s,&c,0,1));if(!s->count&&!s->stage)break;CHECK(arm7_step(&c));}
-    CHECK(i<100&&s->delivered_events==1&&s->native_stack==0x2000&&s->name_ptr==0x6000);
-    CHECK(!memcmp(ram+0x4000,"Tele2",6)&&!memcmp(ram+0x4040,data,3));
-    CHECK(bus_read(b,0x9800,4)==0x163&&bus_read(b,0x9804,4)==0x6040);
+    CHECK(i<100&&s->delivered_events==1&&s->native_stack==0x2000&&s->name_ptr==0x7000);
+    CHECK(!memcmp(ram+0x5000,"Tele2",6)&&!memcmp(ram+0x5040,data,3));
+    CHECK(bus_read(b,0x9800,4)==0x163&&bus_read(b,0x9804,4)==0x7040);
     for(i=0;i<0x1000;++i)CHECK(ram[0x5800+i]==0xa5);
     CHECK(!memcmp(c.r,original.r,sizeof(c.r))&&c.cpsr==original.cpsr&&c.instructions>original.instructions);
     s->boot_ready=1;original.instructions=100000000;
@@ -50,7 +50,17 @@ int main(void)
      CHECK(cellular_sms(s,"+79990001122",text,2,timestamp));
      CHECK(s->events[0].target==s->sr_task&&s->events[0].message==0x1a0);
      CHECK(s->events[0].data[0x1b]==23&&s->events[0].data[0x1c]==4&&s->events[0].data[0x1d]==11);
-     CHECK(s->events[0].data[0x1c+19]==0&&s->events[0].data[0x1c+20]==0x48&&s->events[0].data[0x1c+21]==4&&s->events[0].data[0x1c+22]==0x38);}
+     CHECK(s->events[0].data[0x1c+19]==0&&s->events[0].data[0x1c+20]==0x48&&s->events[0].data[0x1c+21]==4&&s->events[0].data[0x1c+22]==0x38);
+     CHECK(s->events[0].data[0x1c+10]==8);
+     for(i=0;i<4;++i){s->head=s->count=0;
+         CHECK(cellular_sms_class(s,"+79990001122",text,2,timestamp,(int)i));
+         CHECK(s->events[0].data[0x1c+10]==(0x18|i));
+         CHECK(s->events[0].data[0x1b]==23&&s->events[0].data[0x1c+20]==0x48);
+         s->head=s->count=0;CHECK(cellular_sms_class(s,"12",text,2,timestamp,(int)i));
+         CHECK(s->events[0].data[0x1c+5]==(0x18|i));}
+     s->head=s->count=0;
+     CHECK(!cellular_sms_class(s,"+1",text,2,timestamp,4)&&!s->count);
+     CHECK(!cellular_sms_class(s,"+1",text,2,timestamp,-2)&&!s->count);}
     CHECK(!cellular_queue(s,0xffffffffu,0x1000,data,3));
     CHECK(!cellular_queue(s,0xffffffffu,0x1001,ram,8));
     s->head=s->count=0;s->call_state=CELL_FROM_PHONE;s->call_id=2;

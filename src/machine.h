@@ -24,7 +24,7 @@
    loopback cable and the general DMA controller it drives. */
 extern int sgh_service_mode;
 typedef struct { Bus *bus; uint32_t address; uint16_t value; } Identity16;
-typedef struct { Bus *bus; uint32_t address, value; } Register32;
+typedef struct { Bus *bus; uint32_t address, value; int irom_vector; } Register32;
 typedef struct { uint32_t base; size_t size; char path[1024]; } RomImage;
 typedef struct {
     Bus *bus;
@@ -72,6 +72,7 @@ typedef struct {
     int java_extended;
     Lcd lcd;
     Intc intc;
+    Intc intc_aux;
     LpTimer lp_timer;
     Pmic pmic;
     Irom irom;

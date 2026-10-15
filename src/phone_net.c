@@ -119,10 +119,27 @@ static void trace_packet(PhoneNetwork *n,const char *direction,const Datagram *p
     for(i=0;i<8;++i)fprintf(n->trace,"%02x",p->peer[i]);fprintf(n->trace," bytes=%u data=",p->size);
     for(i=0;i<p->size;++i)fprintf(n->trace,"%02x",p->bytes[i]);fputc('\n',n->trace);fflush(n->trace);
 }
+static void retain_url(PhoneNetwork *n,Cellular *cell,Arm7 *c)
+{
+    uint8_t text[1024];unsigned i;uint32_t value,source=c->r[1],base;
+    if(!cell->native_stack||!n->mode||!cell->enabled)return;
+    base=cell->native_stack+CELL_NATIVE_STACK_BYTES;
+    if(source>=base&&source-base<CELL_NATIVE_URL_BYTES)return;
+    for(i=0;i<sizeof(text);++i){if(!bus_peek(c->bus,source+i,1,&value))return;
+        text[i]=(uint8_t)value;if(!value)break;}
+    if(!i||i==sizeof(text))return;
+    base+=(n->url_slot++%4)*1024;
+    for(value=0;value<=i;++value)bus_write(c->bus,base+value,1,text[value]);
+    c->r[1]=base;
+}
 int phone_net_hle(PhoneNetwork *n,Cellular *cell,Arm7 *c)
 {
     uint32_t pc=c->r[15];unsigned channel=c->r[0];PhoneNet *r=n->runtime;
     if(!n->txn_start||!(c->cpsr&ARM_T))return 0;
+    /* The URL scene's edit buffer is cleared while its deferred event is still
+       pending during virtual bearer setup. Give that event stable guest-owned
+       storage, outside the native-call stack, then execute EventPostEvent itself. */
+    if(pc==n->post_event&&c->r[0]==0xb){retain_url(n,cell,c);return 0;}
     if(pc==n->txn_start&&channel<2){int enabled=n->mode&&cell->enabled;
         ++n->start_requests;n->last_bearer=channel;
         if(enabled&&!open_network(n)){snprintf(n->error,sizeof(n->error),"Cannot start the Windows packet-data bridge");enabled=0;}

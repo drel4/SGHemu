@@ -1,8 +1,50 @@
 # Native Win32 frontend
 
-Run `build/sghemu-gui.exe`. The main client area contains only the unframed LCD
-and native keypad buttons below it; the native title/menu bar remains.
+Run `build/sghemu-gui.exe`. The main client area contains the unframed LCD,
+native keypad buttons below it and a bottom status bar; the native title/menu
+bar remains.
+
+## Status bar and Water
+
+The bottom native status bar shows Running, Paused, Stopped (including CPU halt)
+or No firmware. Its right pane reports emulated nanoseconds / elapsed host time
+as a percentage: 100% is real-time, not host CPU usage. Half-second measurement
+windows include audio pacing and host waits. Pause resets the window; a firmware
+reset cannot produce a huge wrapped speed. Before the first sample, or without
+a configured emulated clock, the running speed is `--%`. The GUI can refresh its
+last cached snapshot even when the emulation mutex is busy, allowing the speed
+to fall to zero if progress stalls.
+
+The window grows to accommodate the bar; it does not cover the keypad or LCD
+at scales 1x, 2x or 3x.
+
+**L&F -> Water (not accurate)** is an off-by-default, session-only fictional MA fault simulator,
+not a physical model of water damage. The status bar also marks an active Water
+session. No restart is needed to toggle it. It introduces bounded sequencer
+divider changes (25..325% of the original divider) every 25..160 ms, occasional
+voice pitch/level payload bit errors and PCM sample-hold/bit-crush/dropout/crackle
+effects. PCM effects run on the MA worker
+before CPU-tone mixing. Sample uploads also get sparse low-nibble bit flips
+(about one byte in 512), plus occasional 12..43-byte corruption bursts, affecting
+uploaded voice definitions and PCM/ADPCM data sent to the MA without changing
+the guest's clean copy. Both immediate and delayed RAM uploads are covered;
+delayed packet length bytes and voice selection/note-gate fields are preserved.
+Packet framing, addresses, length fields, firmware bytes
+and NVM are not modified by the effect. Disabling restores the
+original divider and bypasses PCM processing; already-corrupted queued pitch
+commands and damaged uploaded samples may persist until the ringtone is
+reselected or the phone is reset.
+Asynchronous clock faults restore the guest's selected MA port afterwards, so
+they cannot redirect an in-progress firmware read or sample-RAM write into a
+control register and leave playback stuck on held notes.
 Clear/Back occupies a full-width row between navigation/call keys and digits.
+
+The cellular **Send SMS to phone** window has an **SMS level** selector:
+Normal (no class, the default), Class 0 (Flash), Class 1 (Phone), Class 2 (SIM),
+and Class 3 (Terminal). This sets the actual incoming TP-DCS class while retaining
+UCS-2 text encoding; the firmware decides how to display/store each class.
+Encoding follows [3GPP TS 23.038 section 4](https://www.etsi.org/deliver/etsi_TS/123000_123099/123038/08.01.00_60/ts_123038v080100p.pdf).
+
 Integer LCD zoom 1x/2x/3x uses GDI nearest-neighbor `StretchDIBits`.
 
 File > Open firmware folder (Ctrl+O) identifies complete ROM pairs by SHA-256

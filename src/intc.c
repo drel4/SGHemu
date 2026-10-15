@@ -55,5 +55,8 @@ void intc_advance_time(Intc *d, Arm7 *cpu,uint64_t ticks)
     }
     cpu->irq = !!(d->pending & d->enabled & ~d->fiq_select);
     cpu->fiq = !!(d->pending & d->enabled & d->fiq_select);
+    if(d->secondary){Intc *s=d->secondary;
+        cpu->irq|=!!(s->pending&s->enabled&~s->fiq_select);
+        cpu->fiq|=!!(s->pending&s->enabled&s->fiq_select);}
 }
 void intc_advance(Intc *d,Arm7 *cpu){intc_advance_time(d,cpu,cpu->cycles);}

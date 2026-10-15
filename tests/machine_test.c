@@ -162,6 +162,20 @@ int main(void)
         CHECK(!fclose(f));CHECK(!machine_load(&m,"build/machine-fixture.cfg",NULL,NULL));
         machine_destroy(&m);
     }
+    {FILE *f;
+        fixture(0,0);f=fopen("build/machine-fixture.cfg","a");CHECK(f);
+        fputs("irom_version=0x81fe0,0xffff,0x1000010\nirom_vector=0x80030,0x81fe1\n",f);CHECK(!fclose(f));
+        CHECK(machine_load(&m,"build/machine-fixture.cfg",NULL,NULL));
+        CHECK(bus_read(&m.bus,0x80030,4)==0x81fe1&&bus_read(&m.bus,0x80032,2)==8);
+        bus_write(&m.bus,0x80030,4,0);CHECK(m.bus.fault&&bus_read(&m.bus,0x80030,4)==0x81fe1);
+        machine_destroy(&m);
+        fixture(0,0);f=fopen("build/machine-fixture.cfg","a");CHECK(f);
+        fputs("irom_vector=0x80030,0x81fe1\n",f);CHECK(!fclose(f));
+        CHECK(!machine_load(&m,"build/machine-fixture.cfg",NULL,NULL)); /* no backing HLE */
+        fixture(0,0);f=fopen("build/machine-fixture.cfg","a");CHECK(f);
+        fputs("irom_service=0x8077c,memcpy\nirom_vector=0x8003c,0x8077c\n",f);CHECK(!fclose(f));
+        CHECK(!machine_load(&m,"build/machine-fixture.cfg",NULL,NULL)); /* not Thumb */
+    }
     clock_equivalence();
     printf("Machine/frontend backend: %u checks passed.\n", checks); return 0;
 }
