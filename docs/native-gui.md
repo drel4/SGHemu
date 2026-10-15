@@ -8,12 +8,13 @@ bar remains.
 
 The bottom native status bar shows Running, Paused, Stopped (including CPU halt)
 or No firmware. Its right pane reports emulated nanoseconds / elapsed host time
-as a percentage: 100% is real-time, not host CPU usage. Half-second measurement
-windows include audio pacing and host waits. Pause resets the window; a firmware
+as a percentage: 100% is real-time, not host CPU usage. Quarter-second samples
+feed a rolling two-second average including audio pacing and host waits. Pause resets the window; a firmware
 reset cannot produce a huge wrapped speed. Before the first sample, or without
 a configured emulated clock, the running speed is `--%`. The GUI can refresh its
-last cached snapshot even when the emulation mutex is busy, allowing the speed
-to fall to zero if progress stalls.
+state even when the emulation mutex is busy, but never combines a stale guest
+timestamp with the current wall time. After two seconds without a fresh snapshot
+speed becomes unknown (`--%`); measured sustained no-progress becomes zero.
 
 The window grows to accommodate the bar; it does not cover the keypad or LCD
 at scales 1x, 2x or 3x.
@@ -136,11 +137,16 @@ The optional INI `ticks_hz` applies only to profiles without a clock model;
 it is interpreter ticks/sec, not physical CPU MHz.
 See [audio evidence and limitations](ma5-audio.md).
 
-LCD ghosting captures a target only after LCD commands/writes have been quiet
-for 3 ms of guest time. Intermediate clears and partially drawn frames therefore
-do not enter the 75-ms response filter. Painting composes the background and LCD
+LCD presentation prefers a target after LCD commands/writes have been quiet
+for 3 ms of guest time. Normal brief clears and partial redraws therefore
+stay out of the 75-ms response filter. Painting composes the background and LCD
 offscreen and presents them together, with background erasure suppressed to avoid
 flashy frames. Guest pixels and exported screenshots are unaffected.
+Completed frames use a separate short handoff lock, so normal LCD updates and
+ghosting blends continue on GUI timers even during CPU/audio mutex waits.
+Continuously redrawing content has a 33-ms capture bound, so a game that never
+leaves a 3-ms quiet gap cannot starve presentation. That fallback snapshots live
+LCD memory atomically; it does not skip any guest drawing or CPU instructions.
 
 L&F also provides the saved, default-off **C100 MA detune (-12.5 cents)** option.
 It changes Yamaha output live without resetting the phone; other phone models

@@ -28,15 +28,27 @@ int main(void)
     CHECK(apply_logging(1));CHECK(ftell(gui_profile.file)>marker);CHECK(apply_logging(0));CHECK(SetCurrentDirectoryA(root));
     /* A clear followed by a redraw must not become a ghosting target. */
     {uint32_t live[2]={0xffffff,0xffffff},target[2]={0xffffff,0xffffff},ghost[2]={0xffffff,0xffffff};
+     uint32_t published[2]={0xffffff,0xffffff},display[2]={0xffffff,0xffffff};
      app.m.width=2;app.m.height=1;app.m.pixels=live;app.ghost_target=target;app.ghost_pixels=ghost;
+     app.ghost_published=published;app.display_pixels=display;app.display_width=2;app.display_height=1;
      app.ghosting=1;app.m.clock.attached=1;app.m.clock.nanoseconds=1000000;
      live[0]=live[1]=0;app.m.lcd.writes=1;ghost_capture();CHECK(target[0]==0xffffff);
      app.m.clock.nanoseconds=2000000;ghost_capture();CHECK(target[0]==0xffffff);
      live[0]=live[1]=0x123456;app.m.lcd.writes=2;ghost_capture();CHECK(target[0]==0xffffff);
      app.m.clock.nanoseconds=4999999;ghost_capture();CHECK(target[0]==0xffffff);
-     app.m.clock.nanoseconds=5000000;ghost_capture();CHECK(target[0]==0x123456&&!app.ghost_pending);
-     app.ghost_tick=GetTickCount()-75;ghost_frame();CHECK(ghost[0]!=0xffffff&&ghost[0]!=0x123456);
-     app.m.pixels=app.ghost_target=app.ghost_pixels=NULL;app.ghosting=0;}
+     app.m.clock.nanoseconds=5000000;ghost_capture();CHECK(published[0]==0x123456&&target[0]==0xffffff&&!app.ghost_pending);
+     app.ghost_tick=GetTickCount()-75;presentation_tick(0);CHECK(target[0]==0x123456&&ghost[0]!=0xffffff&&ghost[0]!=0x123456);
+     CHECK(display[0]==ghost[0]&&!app.ghost_published_ready);
+     app.ghost_tick=GetTickCount()-75;presentation_tick(0);CHECK(display[0]!=0xffffff&&display[0]!=0x123456);
+     /* No CPU mutex or live guest buffer is needed for raw presentation either. */
+     app.ghosting=0;published[0]=0xabcdef;app.ghost_published_ready=1;app.m.pixels=NULL;
+     presentation_tick(0);CHECK(display[0]==0xabcdef&&target[0]==0xabcdef);
+     app.m.pixels=live;
+     for(i=0;i<40;++i){live[0]=i;app.m.clock.nanoseconds=10000000+(uint64_t)i*1000000;
+         ++app.m.lcd.writes;ghost_capture();}
+     CHECK(published[0]>=33&&app.ghost_published_ready); /* continuous redraw still publishes */
+     app.m.pixels=app.ghost_target=app.ghost_pixels=app.ghost_published=app.display_pixels=NULL;
+     app.display_width=app.display_height=0;app.ghosting=0;}
     /* Hidden native controls: no firmware/DLL, no user settings or desktop input. */
     {INITCOMMONCONTROLSEX common={sizeof(common),ICC_BAR_CLASSES};char state[80];RECT key,bar;
      InitCommonControlsEx(&common);app.window=CreateWindowExA(0,"STATIC","SGHemu status fixture",

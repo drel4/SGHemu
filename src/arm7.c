@@ -133,13 +133,13 @@ static void exception(Arm7 *c, uint32_t mode, uint32_t vector, uint32_t lr, int 
 }
 static uint32_t load_word(Arm7 *c, uint32_t a)
 {
-    return ror(bus_read(c->bus, a & ~3u, 4), (a & 3) * 8);
+    return ror(bus_read_data(c->bus, a & ~3u, 4), (a & 3) * 8);
 }
 static uint32_t load_half(Arm7 *c, uint32_t a, int sign)
 {
     uint32_t v;
-    if (sign && (a & 1)) return (uint32_t)(int32_t)(int8_t)bus_read(c->bus, a, 1);
-    v = bus_read(c->bus, a & ~1u, 2);
+    if (sign && (a & 1)) return (uint32_t)(int32_t)(int8_t)bus_read_data(c->bus, a, 1);
+    v = bus_read_data(c->bus, a & ~1u, 2);
     if (sign) return (uint32_t)(int32_t)(int16_t)v;
     return ror(v, (a & 1) * 8);
 }
@@ -207,8 +207,8 @@ static int arm(Arm7 *c, uint32_t op,const Decoded *d)
         unsigned width = (op & 0x00400000u) ? 1u : 4u;
         if (rn == 15 || rd == 15 || rm == 15) return fail(c, "unpredictable SWP");
         address = c->r[rn]; b = c->r[rm];
-        v = width == 4 ? load_word(c, address) : bus_read(c->bus, address, 1);
-        bus_write(c->bus, width == 4 ? address & ~3u : address, width, b); c->r[rd] = v; return 1;
+        v = width == 4 ? load_word(c, address) : bus_read_data(c->bus, address, 1);
+        bus_write_data(c->bus, width == 4 ? address & ~3u : address, width, b); c->r[rd] = v; return 1;
     }
     a_half: {
         unsigned type = (op >> 5) & 3, load = (op >> 20) & 1;
@@ -217,11 +217,11 @@ static int arm(Arm7 *c, uint32_t op,const Decoded *d)
         v = (op & 0x00800000u) ? a + b : a - b; address = (op & 0x01000000u) ? v : a;
         if (load) {
             if (type == 1) c->r[rd] = load_half(c, address, 0);
-            else if (type == 2) c->r[rd] = (uint32_t)(int32_t)(int8_t)bus_read(c->bus, address, 1);
+            else if (type == 2) c->r[rd] = (uint32_t)(int32_t)(int8_t)bus_read_data(c->bus, address, 1);
             else c->r[rd] = load_half(c, address, 1);
         } else {
             if (type != 1) return fail(c, "reserved signed store");
-            bus_write(c->bus, address & ~1u, 2, reg(c, rd));
+            bus_write_data(c->bus, address & ~1u, 2, reg(c, rd));
         }
         if (!(op & 0x01000000u) || (op & 0x00200000u)) {
             if (load && rn == rd) return fail(c, "unpredictable load/writeback overlap");
@@ -281,10 +281,10 @@ static int arm(Arm7 *c, uint32_t op,const Decoded *d)
         } else b = d->immediate;
         v = (op & 0x00800000u) ? a + b : a - b; address = (op & 0x01000000u) ? v : a;
         if (load) {
-            b = width == 4 ? load_word(c, address) : bus_read(c->bus, address, width);
+            b = width == 4 ? load_word(c, address) : bus_read_data(c->bus, address, width);
             if (rd == 15) { if (width == 1) return fail(c, "unpredictable LDRB pc"); pc_write(c, b); }
             else c->r[rd] = b;
-        } else bus_write(c->bus, width == 4 ? address & ~3u : address, width, rd == 15 ? c->last_pc + 12 : reg(c, rd));
+        } else bus_write_data(c->bus, width == 4 ? address & ~3u : address, width, rd == 15 ? c->last_pc + 12 : reg(c, rd));
         if (!(op & 0x01000000u) || (op & 0x00200000u)) {
             if (rn == 15 || (load && rn == rd)) return fail(c, "unpredictable transfer writeback");
             c->r[rn] = v;
@@ -304,13 +304,13 @@ static int arm(Arm7 *c, uint32_t op,const Decoded *d)
         address = (op & 0x00800000u) ? a + ((op & 0x01000000u) ? 4u : 0u) : a - 4 * count + ((op & 0x01000000u) ? 0u : 4u);
         for (i = 0; i < 16; ++i) if (list & (1u << i)) {
             if (load) {
-                v = bus_read(c->bus, address & ~3u, 4);
+                v = bus_read_data(c->bus, address & ~3u, 4);
                 if (i == 15) { loaded_pc = v; has_pc = 1; }
                 else if (user) set_user_reg(c, i, v); else c->r[i] = v;
             } else {
                 v = i == 15 ? c->last_pc + 12 : user ? user_reg(c, i) : c->r[i];
                 if (wb && i == rn && i != first) v = final;
-                bus_write(c->bus, address & ~3u, 4, v);
+                bus_write_data(c->bus, address & ~3u, 4, v);
             }
             address += 4;
         }
@@ -413,13 +413,13 @@ static ARM7_HOT_INLINE int thumb(Arm7 *c, uint32_t op,unsigned *clocks,const Dec
     t_register_memory: {
         code = d->code; address = c->r[rs] + c->r[rn];
         switch (code) {
-        case 0: bus_write(c->bus, address & ~3u, 4, c->r[rd]); break;
-        case 1: bus_write(c->bus, address & ~1u, 2, c->r[rd]); break;
-        case 2: bus_write(c->bus, address, 1, c->r[rd]); break;
-        case 3: c->r[rd] = (uint32_t)(int32_t)(int8_t)bus_read(c->bus, address, 1); break;
+        case 0: bus_write_data(c->bus, address & ~3u, 4, c->r[rd]); break;
+        case 1: bus_write_data(c->bus, address & ~1u, 2, c->r[rd]); break;
+        case 2: bus_write_data(c->bus, address, 1, c->r[rd]); break;
+        case 3: c->r[rd] = (uint32_t)(int32_t)(int8_t)bus_read_data(c->bus, address, 1); break;
         case 4: c->r[rd] = load_word(c, address); break;
         case 5: c->r[rd] = load_half(c, address, 0); break;
-        case 6: c->r[rd] = bus_read(c->bus, address, 1); break;
+        case 6: c->r[rd] = bus_read_data(c->bus, address, 1); break;
         default: c->r[rd] = load_half(c, address, 1); break;
         }
         return 1;
@@ -427,16 +427,16 @@ static ARM7_HOT_INLINE int thumb(Arm7 *c, uint32_t op,unsigned *clocks,const Dec
     t_immediate_memory: {
         unsigned width = d->code;
         address = c->r[rs] + d->immediate;
-        if (op & 0x800u) c->r[rd] = width == 4 ? load_word(c, address) : bus_read(c->bus, address, 1);
-        else bus_write(c->bus, width == 4 ? address & ~3u : address, width, c->r[rd]); return 1;
+        if (op & 0x800u) c->r[rd] = width == 4 ? load_word(c, address) : bus_read_data(c->bus, address, 1);
+        else bus_write_data(c->bus, width == 4 ? address & ~3u : address, width, c->r[rd]); return 1;
     }
     t_half: {
         address = c->r[rs] + d->immediate;
-        if (op & 0x800u) c->r[rd] = load_half(c, address, 0); else bus_write(c->bus, address & ~1u, 2, c->r[rd]); return 1;
+        if (op & 0x800u) c->r[rd] = load_half(c, address, 0); else bus_write_data(c->bus, address & ~1u, 2, c->r[rd]); return 1;
     }
     t_sp_memory: {
         address = c->r[13] + d->immediate;
-        if (op & 0x800u) c->r[rd] = load_word(c, address); else bus_write(c->bus, address & ~3u, 4, c->r[rd]); return 1;
+        if (op & 0x800u) c->r[rd] = load_word(c, address); else bus_write_data(c->bus, address & ~3u, 4, c->r[rd]); return 1;
     }
     t_address: {
         c->r[rd] = ((op & 0x800u) ? c->r[13] : (c->last_pc + 4) & ~3u) + d->immediate; return 1;
@@ -449,10 +449,10 @@ static ARM7_HOT_INLINE int thumb(Arm7 *c, uint32_t op,unsigned *clocks,const Dec
         if (!count) return fail(c, "empty Thumb PUSH/POP");
         address = pop ? c->r[13] : c->r[13] - count * 4;
         for (i = 0; i < 8; ++i) if (list & (1u << i)) {
-            if (pop) c->r[i] = bus_read(c->bus, address & ~3u, 4); else bus_write(c->bus, address & ~3u, 4, c->r[i]); address += 4;
+            if (pop) c->r[i] = bus_read_data(c->bus, address & ~3u, 4); else bus_write_data(c->bus, address & ~3u, 4, c->r[i]); address += 4;
         }
         if (op & 0x100u) {
-            if (pop) pc_write(c, bus_read(c->bus, address & ~3u, 4)); else bus_write(c->bus, address & ~3u, 4, c->r[14]);
+            if (pop) pc_write(c, bus_read_data(c->bus, address & ~3u, 4)); else bus_write_data(c->bus, address & ~3u, 4, c->r[14]);
         }
         c->r[13] = pop ? c->r[13] + count * 4 : c->r[13] - count * 4; return 1;
     }
@@ -460,13 +460,13 @@ static ARM7_HOT_INLINE int thumb(Arm7 *c, uint32_t op,unsigned *clocks,const Dec
         unsigned list = op & 255, load = (op >> 11) & 1, first = d->code, count = d->count;
         a = c->r[rn]; address = a;
         if (!list) {
-            if (load) pc_write(c, bus_read(c->bus, address & ~3u, 4));
-            else bus_write(c->bus, address & ~3u, 4, c->last_pc + 4);
+            if (load) pc_write(c, bus_read_data(c->bus, address & ~3u, 4));
+            else bus_write_data(c->bus, address & ~3u, 4, c->last_pc + 4);
             c->r[rn] += 64; return 1;
         }
         for (i = 0; i < 8; ++i) if (list & (1u << i)) {
-            if (load) c->r[i] = bus_read(c->bus, address & ~3u, 4);
-            else bus_write(c->bus, address & ~3u, 4, i == rn && i != first ? a + count * 4 : c->r[i]);
+            if (load) c->r[i] = bus_read_data(c->bus, address & ~3u, 4);
+            else bus_write_data(c->bus, address & ~3u, 4, i == rn && i != first ? a + count * 4 : c->r[i]);
             address += 4;
         }
         if (!load || !(list & (1u << rn))) c->r[rn] = address; return 1;
@@ -509,7 +509,7 @@ int arm7_step(Arm7 *c)
     if (c->fiq && !(c->cpsr & 0x40u)) { exception(c, 0x11, 0x1c, c->last_pc + 4, 1); ++c->cycles;c->clock_cycles+=3; return 1; }
     if (c->irq && !(c->cpsr & 0x80u)) { exception(c, 0x12, 0x18, c->last_pc + 4, 0); ++c->cycles;c->clock_cycles+=3; return 1; }
     c->last_opcode = c->cache?bus_fetch(c->bus,c->last_pc,(c->cpsr&ARM_T)?2:4,&c->cache->fetch):
-        bus_read(c->bus, c->last_pc, (c->cpsr & ARM_T) ? 2 : 4);
+        bus_read_data(c->bus, c->last_pc, (c->cpsr & ARM_T) ? 2 : 4);
     if (c->bus->fault) return fail(c, "instruction fetch/bus fault pending");
     if(c->cpsr&ARM_T){
         if(c->cache&&c->last_opcode<=65535){d=&c->cache->thumb[c->last_opcode];if(!d->kind)decode_thumb((Decoded *)d,c->last_opcode);}

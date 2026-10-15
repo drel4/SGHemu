@@ -3,6 +3,9 @@
 Samsung SGH feature-phone emulator, starting with SGH-C100 / Skyworks CX805.
 Runtime and tools are plain **C17**, MSVC **2026 x86**, `/W4 /WX`.
 Release uses `/O2 /GL /LTCG /MT`; Debug enables `/RTC1`.
+The GUI also uses bounded execution and direct RAM access fast paths, without
+idle-loop skipping. [Measurements](docs/bounded-execution.md) and an optional
+[profile-guided build workflow](docs/profile-guided-build.md) are available.
 Windows 7 API/subsystem target; actual execution on Windows 7 is untested.
 
 [Download Windows x86 builds](https://github.com/drel4/SGHemu/releases).
@@ -18,7 +21,7 @@ Windows 7 API/subsystem target; actual execution on Windows 7 is untested.
 
 The native status bar shows **Running / Paused / Stopped** and emulation speed.
 **100% means real-time speed**, measured from emulated time versus wall time;
-the display settles over half-second intervals and reads zero while paused.
+the display averages actual progress over about two seconds and reads zero while paused.
 
 C100 navigation/key tones have an independent CPU/DSP PCM output, even
 without Yamaha DLLs. The program icon shows the native RGB service-LED color.

@@ -117,8 +117,9 @@ typedef struct {
     int ghosting;
     int ma_detune;
     int ma_water; /* Session-only: deliberately damaged sound is never a startup default. */
-    uint32_t *ghost_pixels,*ghost_target,*display_pixels;unsigned display_width,display_height;
-    uint64_t ghost_writes,ghost_commands,ghost_changed_at;
+    uint32_t *ghost_pixels,*ghost_target,*ghost_published,*display_pixels;unsigned display_width,display_height;
+    int ghost_published_ready;
+    uint64_t ghost_writes,ghost_commands,ghost_changed_at,ghost_first_changed_at;
     int ghost_pending;
     DWORD ghost_tick;
     HICON led_icons[8];
@@ -126,6 +127,8 @@ typedef struct {
     int reload_defaults; /* set by the emulation thread, consumed by the GUI thread */
 } App;
 static App app;
+/* Only the complete-frame handoff uses this lock, never CPU/audio work. */
+static SRWLOCK presentation_lock=SRWLOCK_INIT;
 /* Threading model:
    - The emulation thread (emu_main) steps the CPU and drives audio. With
      hardware audio on, the WaveOut queue's backpressure is the clock.
@@ -152,8 +155,8 @@ static void emu_lock(void)
 }
 static void emu_unlock(void) { ReleaseMutex(emu_mutex); }
 static void update_ui(void);
-/* Called only by the GUI thread. With fresh=0 it uses its own last snapshot,
-   so speed can fall to zero even if the emulation thread holds the mutex. */
+/* Called only by the GUI thread. Never pair an old guest snapshot with a new
+   wall timestamp when audio/CPU work temporarily owns the emulation mutex. */
 static void status_refresh(int fresh)
 {
     LARGE_INTEGER now,frequency;char text[80],speed[32];int running;
@@ -168,8 +171,9 @@ static void status_refresh(int fresh)
             app.m.cpu.halted?"Stopped (CPU)":running?"Running":
             app.state&&(strstr(app.state,"stopped")||strstr(app.state,"failed"))?"Stopped":"Paused");
     }
-    emu_speed_sample(&app.speed,(uint64_t)now.QuadPart,(uint64_t)frequency.QuadPart,
+    if(fresh)emu_speed_sample(&app.speed,(uint64_t)now.QuadPart,(uint64_t)frequency.QuadPart,
         app.status_guest,app.status_running&&app.status_clock);
+    else emu_speed_stale(&app.speed,(uint64_t)now.QuadPart,(uint64_t)frequency.QuadPart);
     snprintf(text,sizeof(text),"%s%s",app.status_state,app.status_water?" | Water":"");
     if(!app.status_running)strcpy(speed,"0.0%");
     else if(!app.speed.valid||!app.status_clock)strcpy(speed,"--%");
@@ -221,7 +225,7 @@ static void update_led_icon(void)
 }
 static void ghost_frame(void)
 {
-    DWORD now=GetTickCount(),elapsed=now-app.ghost_tick;size_t i,n=(size_t)app.m.width*app.m.height;
+    DWORD now=GetTickCount(),elapsed=now-app.ghost_tick;size_t i,n=(size_t)app.display_width*app.display_height;
     unsigned retain=(unsigned)(exp(-(double)elapsed/75.0)*256.0);
     const uint32_t *target=app.pattern?app.test_pixels:app.ghost_target;
     app.ghost_tick=now;if(!target||!app.ghost_pixels)return;
@@ -231,18 +235,44 @@ static void ghost_frame(void)
             if(a>b?a-b<=2:b-a<=2)v=b;result|=v<<shift;}
         app.ghost_pixels[i]=result;}
 }
-/* Publish a settled guest redraw, not its temporary clear/partially drawn
-   pixels. Called on the emulation thread with emu_mutex held. */
+/* Prefer a settled guest redraw over a temporary clear. Continuous redraws
+   use a bounded snapshot. Emulation thread only, with emu_mutex held. */
 static void ghost_capture(void)
 {
     uint64_t now=app.m.clock.nanoseconds;
-    if(!app.ghosting||app.pattern||!app.ghost_target||!app.m.pixels)return;
-    if(!app.m.clock.attached){memcpy(app.ghost_target,app.m.pixels,(size_t)app.m.width*app.m.height*4);return;}
-    if(app.ghost_writes!=app.m.lcd.writes||app.ghost_commands!=app.m.lcd.commands){
+    if(app.pattern||!app.ghost_published||!app.m.pixels)return;
+    if(!app.m.clock.attached)app.ghost_pending=1;
+    else if(app.ghost_writes!=app.m.lcd.writes||app.ghost_commands!=app.m.lcd.commands){
         app.ghost_writes=app.m.lcd.writes;app.ghost_commands=app.m.lcd.commands;
+        if(!app.ghost_pending)app.ghost_first_changed_at=now;
         app.ghost_changed_at=now;app.ghost_pending=1;
-    }else if(app.ghost_pending&&now-app.ghost_changed_at>=3000000){
-        memcpy(app.ghost_target,app.m.pixels,(size_t)app.m.width*app.m.height*sizeof(uint32_t));app.ghost_pending=0;
+    }
+    /* Continuous drawing (e.g. games) must not starve presentation forever.
+       Prefer a settled redraw, otherwise latch a consistent 30-Hz snapshot. */
+    if(app.ghost_pending&&(!app.m.clock.attached||now-app.ghost_changed_at>=3000000||
+        now-app.ghost_first_changed_at>=33333333)){
+        AcquireSRWLockExclusive(&presentation_lock);
+        memcpy(app.ghost_published,app.m.pixels,(size_t)app.m.width*app.m.height*sizeof(uint32_t));
+        app.ghost_published_ready=1;ReleaseSRWLockExclusive(&presentation_lock);app.ghost_pending=0;
+    }
+}
+/* GUI-only blending continues even while the CPU waits on an audio buffer.
+   Never read app.m or its live framebuffer without the emulation mutex. */
+static void presentation_tick(int fresh)
+{
+    size_t bytes=(size_t)app.display_width*app.display_height*sizeof(uint32_t);
+    if(app.ghost_target&&app.ghost_published){int changed;
+        AcquireSRWLockExclusive(&presentation_lock);
+        changed=app.ghost_published_ready;
+        if(app.ghost_published_ready){memcpy(app.ghost_target,app.ghost_published,bytes);app.ghost_published_ready=0;}
+        ReleaseSRWLockExclusive(&presentation_lock);
+        if(app.ghosting&&app.ghost_pixels)ghost_frame();
+        if(app.display_pixels){const uint32_t *frame=app.ghosting&&app.ghost_pixels?app.ghost_pixels:
+                app.pattern?app.test_pixels:app.ghost_target;
+            if(frame)memcpy(app.display_pixels,frame,bytes);}
+        if(app.window&&(changed||app.ghosting))InvalidateRect(app.window,&app.lcd,FALSE);
+    }else if(fresh&&app.display_pixels){const uint32_t *frame=app.pattern?app.test_pixels:app.m.pixels;
+        if(frame)memcpy(app.display_pixels,frame,bytes);
     }
 }
 static const char *key_names[SGH_MAX_KEYS] = {
@@ -496,6 +526,7 @@ static int load_model(void)
         *app.nv_input = 0; return 0;
     }
     free(app.ghost_pixels);app.ghost_pixels=NULL;free(app.ghost_target);app.ghost_target=NULL;
+    free(app.ghost_published);app.ghost_published=NULL;app.ghost_published_ready=0;
     free(app.display_pixels);app.display_pixels=NULL;app.display_width=app.display_height=0;
     app.ghost_writes=app.ghost_commands=app.ghost_changed_at=0;app.ghost_pending=0;
     profile_close();
@@ -594,6 +625,7 @@ static int load_model(void)
         app.ghost_pixels=malloc(bytes);if(app.ghost_pixels)memcpy(app.ghost_pixels,app.m.pixels,bytes);
         app.ghost_target=malloc(bytes);if(app.ghost_target)memcpy(app.ghost_target,app.m.pixels,bytes);
         else {free(app.ghost_pixels);app.ghost_pixels=NULL;}
+        app.ghost_published=malloc(bytes);if(app.ghost_published)memcpy(app.ghost_published,app.m.pixels,bytes);
         app.display_pixels=malloc(bytes);if(app.display_pixels){memcpy(app.display_pixels,app.m.pixels,bytes);app.display_width=app.m.width;app.display_height=app.m.height;}
         app.ghost_tick=GetTickCount();
         app.m.phone_io.mixed=app.m.ma3.hw!=NULL;
@@ -757,6 +789,8 @@ static void command(unsigned id)
         if(app.ghost_pixels&&app.m.pixels)memcpy(app.ghost_pixels,app.pattern?app.test_pixels:app.m.pixels,
             (size_t)app.m.width*app.m.height*sizeof(uint32_t));
         if(app.ghost_target&&app.m.pixels)memcpy(app.ghost_target,app.m.pixels,(size_t)app.m.width*app.m.height*sizeof(uint32_t));
+        if(app.ghost_published&&app.m.pixels)memcpy(app.ghost_published,app.m.pixels,(size_t)app.m.width*app.m.height*sizeof(uint32_t));
+        app.ghost_published_ready=0;
         app.ghost_writes=app.m.lcd.writes;app.ghost_commands=app.m.lcd.commands;app.ghost_pending=0;
         CreateDirectoryA("state",NULL);WritePrivateProfileStringA("look_and_feel","lcd_ghosting",app.ghosting?"1":"0",app.emulator_settings);
         InvalidateRect(app.window,&app.lcd,FALSE);break;
@@ -949,9 +983,7 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
     if (message == WM_EXITMENULOOP) { app.menu_active = 0; return 0; }
     if (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) { release_keys(); update_ui(); }
     if (message == WM_TIMER) {
-        status_refresh(1);fs_tick();cell_tick();update_led_icon();if(app.ghosting){ghost_frame();InvalidateRect(window,&app.lcd,FALSE);}
-        if(app.display_pixels){const uint32_t *frame=app.ghosting&&app.ghost_pixels?app.ghost_pixels:app.pattern?app.test_pixels:app.m.pixels;
-            if(frame)memcpy(app.display_pixels,frame,(size_t)app.display_width*app.display_height*sizeof(uint32_t));}
+        status_refresh(1);fs_tick();cell_tick();update_led_icon();presentation_tick(1);
         if(app.host_time&&app.m.rtc.attached&&GetTickCount()-app.time_checkpoint>=1000){
             app.time_checkpoint=GetTickCount();(void)host_sync_rtc(&app.m.rtc);
         }
@@ -1032,7 +1064,7 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
         if(app.battery_window)DestroyWindow(app.battery_window);
         nvram_store_release(&app.storage);
         content_import_release(&app.content);
-        profile_close();machine_destroy(&app.m); free(app.test_pixels);free(app.ghost_pixels);free(app.ghost_target);free(app.display_pixels);
+        profile_close();machine_destroy(&app.m); free(app.test_pixels);free(app.ghost_pixels);free(app.ghost_target);free(app.ghost_published);free(app.display_pixels);
         {unsigned i;for(i=0;i<8;++i)if(app.led_icons[i])DestroyIcon(app.led_icons[i]);} if (app.log) fclose(app.log);
         if (app.font) DeleteObject(app.font); PostQuitMessage(0); return 0;
     }
@@ -1055,7 +1087,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
     if(message==WM_ERASEBKGND)return 1;
     if(message==WM_PAINT)return window_message(window,message,wparam,lparam,&handled);
     if(message==WM_TIMER&&WaitForSingleObject(emu_mutex,2)!=WAIT_OBJECT_0){
-        if(profile_enabled)InterlockedIncrement(&profile_skipped);status_refresh(0);return 0;}
+        if(profile_enabled)InterlockedIncrement(&profile_skipped);status_refresh(0);presentation_tick(0);return 0;}
     if(message==WM_TIMER){result=window_message(window,message,wparam,lparam,&handled);emu_unlock();return result;}
     if (!window_needs_lock(message)) return DefWindowProcA(window, message, wparam, lparam);
     emu_lock(); result = window_message(window, message, wparam, lparam, &handled); emu_unlock();
@@ -1070,6 +1102,7 @@ static void emu_slice(LONGLONG frequency, int paced)
     LONGLONG budget = frequency * 2 / 1000; /* Short slices keep input responsive. */
     QueryPerformanceCounter(&start);
     for (i = 0; i < limit; ++i) {
+        unsigned batch=1,at=i;
         if(!(i%1000))ghost_capture();
         if(!(i%1000)&&(app.text_keys.count||app.text_keys.pressed))text_step();
         if(gui_profile.file&&!(i&1023))profile_sample(app.m.cpu.r[15]);
@@ -1098,7 +1131,18 @@ static void emu_slice(LONGLONG frequency, int paced)
                the queued record and its data before the next NVM save. */
             if (imported == 2) PostMessageA(app.window, WM_EMU_EVENT, EMU_IMPORT_DONE, 0);
         }
-        if (!machine_step(&app.m, app.continuation)) {
+        /* Provisioning and imports borrow live CPU state at exact PCs. Keep
+           their original single-step path; ordinary execution can batch up to
+           the next frontend sample/input boundary without hiding an edge. */
+        if(!app.storage.defaults_boot&&(!app.storage.provision||app.storage.stage==3)&&
+           !(app.content.active&&!app.content.done&&!app.content.failed)&&
+           (!app.m.battery.enabled||app.m.battery.adc)){
+            unsigned boundary=1000-i%1000;batch=64;
+            if(batch>boundary)batch=boundary;
+            if(batch>limit-i)batch=limit-i;
+            if(gui_profile.file){boundary=1024-(i&1023);if(batch>boundary)batch=boundary;}
+        }
+        if (machine_run(&app.m,batch,app.continuation)!=batch) {
             const char *reason=app.m.cpu.error?app.m.cpu.error:"unmapped access";FILE *files[2]={app.log,gui_profile.file};unsigned f;
             for(f=0;f<2;++f)if(files[f]){unsigned reg;
                 fprintf(files[f],"# STOP pc=%08x last_pc=%08x opcode=%08x cpsr=%08x reason=%s\n",
@@ -1106,7 +1150,8 @@ static void emu_slice(LONGLONG frequency, int paced)
                 for(reg=0;reg<16;++reg)fprintf(files[f],"r%u=%08x%s",reg,app.m.cpu.r[reg],reg%4==3?"\n":" ");fflush(files[f]);}
             app.running = 0; app.state = app.m.cpu.halted ? "CPU stopped - see diagnostics" : "Unknown hardware - stopped"; return;
         }
-        if (!(i % 1000)) {
+        i+=batch-1;
+        if (!(at % 1000)) {
             QueryPerformanceCounter(&now);
             if (now.QuadPart - start.QuadPart >= budget) break;
         }

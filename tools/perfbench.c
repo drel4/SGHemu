@@ -5,15 +5,23 @@
 #include "nvram.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+static int single_step;
 static int run(Machine *m,unsigned count)
 {
-    while(count--){if(!m->cellular.stage&&!battery_step(&m->battery,&m->cpu))return 0;
-        if(!machine_step(m,1))return 0;}return 1;
+    while(count){unsigned n=single_step||(!m->battery.adc&&m->battery.enabled)?1:256;
+        if(n>count)n=count;
+        if(!m->cellular.stage&&!battery_step(&m->battery,&m->cpu))return 0;
+        if(single_step){if(!machine_step(m,1))return 0;}
+        else if(machine_run(m,n,1)!=n)return 0;
+        count-=n;
+    }return 1;
 }
 int main(int argc,char **argv)
 {
     Machine *m=calloc(1,sizeof(*m));LARGE_INTEGER before,after,freq;unsigned i;uint32_t hash=2166136261u;int result=1;
-    if(!m||argc!=3){fprintf(stderr,"Usage: perfbench MODEL.cfg READ_ONLY.snv\n");free(m);return 2;}
+    if(!m||(argc!=3&&argc!=4)||(argc==4&&strcmp(argv[3],"--step"))){fprintf(stderr,"Usage: perfbench MODEL.cfg READ_ONLY.snv [--step]\n");free(m);return 2;}
+    single_step=argc==4;
     if(!machine_load(m,argv[1],NULL,NULL)||!nvram_load(m,argv[2])||!cellular_set_network(&m->cellular,&m->bus,1,"Tele2"))goto done;
     phone_net_set_mode(&m->network,2);if(!run(m,250000000))goto done;
     QueryPerformanceFrequency(&freq);QueryPerformanceCounter(&before);if(!run(m,50000000))goto done;QueryPerformanceCounter(&after);

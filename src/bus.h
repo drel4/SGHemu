@@ -22,6 +22,7 @@ typedef struct {
     unsigned count;
     uint32_t pc;
     uint64_t ticks, faults;
+    uint32_t device_epoch; /* Any callback access ends a bounded CPU batch. */
     FILE *log;
     FILE *access_log; /* Optional inclusive-start/exclusive-end watch ranges. */
     uint32_t watch_start, watch_end; /* Legacy single range; mirrors the first parsed range. */
@@ -43,6 +44,26 @@ unsigned bus_watch_parse(Bus *b, const char *spec);
 int bus_map(Bus *b, uint32_t base, uint32_t size, uint8_t *data, int readonly, int owned);
 int bus_device(Bus *b, uint32_t base, uint32_t size, PeripheralRead read, PeripheralWrite write, void *ctx);
 uint32_t bus_read(Bus *b, uint32_t address, unsigned width);
+/* CPU data fast paths: only a complete cached page of ordinary memory may
+   bypass the general dispatcher. Device writes (including flash commands),
+   diagnostics, partial pages and page-crossing accesses keep their callbacks. */
+static inline Region *bus_data_region(Bus *b,uint32_t address,unsigned width)
+{
+    unsigned index;
+    if(!b->pages_ready||b->access_log||(width!=1&&width!=2&&width!=4)||
+       (address&((1u<<BUS_PAGE_SHIFT)-1))>(1u<<BUS_PAGE_SHIFT)-width)return NULL;
+    index=b->page[address>>BUS_PAGE_SHIFT];
+    return index?&b->regions[index-1]:NULL;
+}
+static inline uint32_t bus_read_data(Bus *b,uint32_t address,unsigned width)
+{
+    Region *r=bus_data_region(b,address,width);uint32_t value;
+    if(!r||!r->data||(r->read&&!r->fast))return bus_read(b,address,width);
+    if(width==4){memcpy(&value,r->data+(address-r->base),4);return value;}
+    if(width==2){uint16_t half;memcpy(&half,r->data+(address-r->base),2);return half;}
+    return r->data[address-r->base];
+}
+static inline void bus_write_data(Bus *b,uint32_t address,unsigned width,uint32_t value);
 typedef struct {Region *region;uint32_t generation;Bus *owner;} BusFetchHint;
 Region *bus_fetch_region(Bus *b,uint32_t address,unsigned width,BusFetchHint *hint);
 /* Always read live bytes. Never bypass device modes, fault handling or watches. */
@@ -59,6 +80,14 @@ static inline uint32_t bus_fetch(Bus *b,uint32_t address,unsigned width,BusFetch
     return value;
 }
 void bus_write(Bus *b, uint32_t address, unsigned width, uint32_t value);
+static inline void bus_write_data(Bus *b,uint32_t address,unsigned width,uint32_t value)
+{
+    Region *r=bus_data_region(b,address,width);
+    if(!r||!r->data||r->write||r->readonly){bus_write(b,address,width,value);return;}
+    if(width==4)memcpy(r->data+(address-r->base),&value,4);
+    else if(width==2){uint16_t half=(uint16_t)value;memcpy(r->data+(address-r->base),&half,2);}
+    else r->data[address-r->base]=(uint8_t)value;
+}
 /* Diagnostics only: read mapped memory without faulting, logging, or touching a
    device callback. Returns 0 when no plain readable memory covers the access. */
 int bus_peek(Bus *b, uint32_t address, unsigned width, uint32_t *value);

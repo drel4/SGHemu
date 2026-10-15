@@ -103,6 +103,9 @@ int machine_load_pair(Machine *m, const char *config_path, const char *rom_overr
     const char *second_override, FILE *log);
 void machine_destroy(Machine *m);
 int machine_step(Machine *m, int continue_unmapped);
+/* Execute up to count ordinary machine steps; returns completed steps. No
+   instruction/idle-loop skipping. Callers must bound count for host input. */
+unsigned machine_run(Machine *m,unsigned count,int continue_unmapped);
 void machine_key(Machine *m, unsigned key, int down);
 void machine_pattern(Machine *m, int enabled);
 #endif

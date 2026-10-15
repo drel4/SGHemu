@@ -10,8 +10,10 @@ int main(int argc,char **argv)
     m=calloc(1,sizeof(*m));if(!m)return 1;
     if(!machine_load(m,argv[1],NULL,NULL)||!nvram_load(m,argv[2])||!m->battery.complete_port)goto done;
     battery_set(&m->battery,percent,1);
-    for(i=0;i<400000000;++i){if(!machine_step(m,1))goto done;
-        if(i==149999999){snprintf(path,sizeof(path),"%s-before.bmp",argv[4]);if(!lcd_save_bmp(&m->lcd,path))goto done;}}
+    for(i=0;i<400000000;){unsigned boundary=i<150000000?150000000:400000000;
+        unsigned n=boundary-i;if(n>256)n=256;
+        if(machine_run(m,n,1)!=n)goto done;i+=n;
+        if(i==150000000){snprintf(path,sizeof(path),"%s-before.bmp",argv[4]);if(!lcd_save_bmp(&m->lcd,path))goto done;}}
     snprintf(path,sizeof(path),"%s-after.bmp",argv[4]);if(!lcd_save_bmp(&m->lcd,path))goto done;
     /* Firmware stopping the active-low charger output acknowledges completion.
        No PC, native mode variable, animation resource or pixels are patched. */

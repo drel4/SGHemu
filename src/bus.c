@@ -119,7 +119,7 @@ uint32_t bus_read(Bus *b, uint32_t a, unsigned width)
     Region *r = lookup(b, a, width);
     uint32_t value = 0;
     if (!r) fault(b, 'R', a, width, 0, "unmapped");
-    else if (r->read && !r->fast) value = r->read(r->context, a - r->base, width);
+    else if (r->read && !r->fast) {++b->device_epoch;value = r->read(r->context, a - r->base, width);}
     else {
         const uint8_t *p = r->data + (a - r->base); /* little-endian host (x86) */
         if (width == 4) memcpy(&value, p, 4);
@@ -150,7 +150,7 @@ void bus_write(Bus *b, uint32_t a, unsigned width, uint32_t value)
     Region *r = lookup(b, a, width);
     if (b->access_log) watch(b, 'W', a, width, value, r);
     if (!r) { fault(b, 'W', a, width, value, "unmapped"); return; }
-    if (r->write) { r->write(r->context, a - r->base, width, value); return; }
+    if (r->write) { ++b->device_epoch;r->write(r->context, a - r->base, width, value); return; }
     if (r->readonly) { fault(b, 'W', a, width, value, "ROM write"); return; }
     {
         uint8_t *p = r->data + (a - r->base);

@@ -30,14 +30,25 @@ int main(void)
     }
     emu_speed_sample(&speed,0,1000,0,1);CHECK(!speed.valid);
     emu_speed_sample(&speed,500,1000,500000000,1);CHECK(speed.valid&&speed.percent==100);
-    emu_speed_sample(&speed,1000,1000,1500000000,1);CHECK(speed.percent==200);
-    emu_speed_sample(&speed,1500,1000,1750000000,1);CHECK(speed.percent==50);
-    emu_speed_sample(&speed,2000,1000,1750000000,1);CHECK(speed.percent==0); /* no progress */
+    emu_speed_sample(&speed,1000,1000,1500000000,1);CHECK(speed.percent==150);
+    emu_speed_sample(&speed,1500,1000,1750000000,1);CHECK(speed.percent>116&&speed.percent<117);
+    emu_speed_stale(&speed,1600,1000);CHECK(speed.valid&&speed.percent>116&&speed.percent<117);
+    emu_speed_sample(&speed,2000,1000,1750000000,1);CHECK(speed.percent==87.5);
+    emu_speed_sample(&speed,2500,1000,1750000000,1);CHECK(speed.percent==62.5);
+    emu_speed_sample(&speed,3000,1000,1750000000,1);
+    emu_speed_sample(&speed,3500,1000,1750000000,1);
+    emu_speed_sample(&speed,4000,1000,1750000000,1);CHECK(speed.percent==0); /* sustained no progress */
+    emu_speed_stale(&speed,6000,1000);CHECK(!speed.valid);
     emu_speed_sample(&speed,2100,1000,1750000000,0);CHECK(!speed.valid&&!speed.primed&&speed.percent==0);
     emu_speed_sample(&speed,6000,1000,1750000000,1);
     emu_speed_sample(&speed,6500,1000,2250000000,1);CHECK(speed.percent==100); /* pause excluded */
     emu_speed_sample(&speed,7000,1000,0,1);CHECK(!speed.valid); /* reset */
     emu_speed_sample(&speed,7500,1000,500000000,1);CHECK(speed.percent==100);
     emu_speed_sample(&speed,7600,0,500000000,1);CHECK(!speed.valid);
+    {EmuSpeed burst={0};uint64_t ns=0;
+     for(i=0;i<=160;++i){ns=(uint64_t)(i/2)*50000000u;emu_speed_sample(&burst,(uint64_t)i*25,1000,ns,1);
+        if(i>=20)CHECK(burst.valid&&burst.percent==100);}
+     emu_speed_sample(&burst,4250,1000,ns+125000000,1);CHECK(burst.percent<100&&burst.percent>90);
+    }
     printf("Water PCM and speed meter: %u checks passed\n",checks);return 0;
 }

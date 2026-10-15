@@ -94,3 +94,8 @@ The native framebuffer, guest reads and LCD dumps remain exact and unchanged.
 Only the displayed copy blends toward the current frame on the GUI refresh
 timer; this continues after Pause so the display can settle. Toggling the effect
 or loading another model initializes its history from the current frame.
+
+Latched LCD snapshots now cross a short, separate presentation lock. The GUI can
+receive a new frame and advance its wall-time ghosting blend even while
+the emulation thread is blocked on audio output. This applies to normal LCD
+presentation too; it does not read a partially changing guest framebuffer.

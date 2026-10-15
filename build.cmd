@@ -15,6 +15,14 @@ set "LFLAGS="
 set "CFLAGS=/nologo /std:c17 /W4 /WX /Od /Zi /RTC1 /MD /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0601 /Isrc /Fobuild\ /Fdbuild\sghemu.pdb"
 if /i "%~1"=="release" set "CFLAGS=/nologo /std:c17 /W4 /WX /O2 /GL /MT /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0601 /Isrc /Fobuild\"
 if /i "%~1"=="release" set "LFLAGS=/LTCG"
+if /i "%~2"=="gui-only" (
+  if /i not "%~1"=="release" exit /b 1
+  goto gui_build
+)
+cl %CFLAGS% tests\bus_data_test.c src\bus.c /Febuild\bus_data_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01
+if errorlevel 1 exit /b 1
+build\bus_data_test.exe
+if errorlevel 1 exit /b 1
 cl %CFLAGS% tests\ma_water_test.c /Febuild\ma_water_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01
 if errorlevel 1 exit /b 1
 build\ma_water_test.exe
@@ -115,9 +123,14 @@ cl %CFLAGS% tools\phonedrive.c src\nvram.c src\host.c src\content.c src\jar.c sr
 if errorlevel 1 exit /b 1
 cl %CFLAGS% tools\perfbench.c src\nvram.c src\host.c src\content.c src\jar.c src\jar_inflate.c src\firmware.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Febuild\perfbench.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01 bcrypt.lib version.lib winmm.lib windowscodecs.lib ole32.lib uuid.lib ws2_32.lib winhttp.lib
 if errorlevel 1 exit /b 1
+:gui_build
 if not defined SGHEMU_GUI_OUT set "SGHEMU_GUI_OUT=build\sghemu-gui.exe"
-cl %CFLAGS% src\gui.c src\userfs.c src\nvram.c src\host.c src\content.c src\jar.c src\jar_inflate.c src\firmware.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Fe%SGHEMU_GUI_OUT% /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:WINDOWS,6.01 /MANIFEST:EMBED /MANIFESTINPUT:src\gui.manifest user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib uuid.lib bcrypt.lib version.lib winmm.lib windowscodecs.lib ole32.lib uuid.lib ws2_32.lib winhttp.lib
+set "GUI_LFLAGS=%LFLAGS%"
+if /i "%SGHEMU_PGO_PHASE%"=="instrument" set "GUI_LFLAGS=%LFLAGS% /GENPROFILE /PGD:%SGHEMU_PGO_DATABASE%"
+if /i "%SGHEMU_PGO_PHASE%"=="optimize" set "GUI_LFLAGS=%LFLAGS% /USEPROFILE /PGD:%SGHEMU_PGO_DATABASE%"
+cl %CFLAGS% src\gui.c src\userfs.c src\nvram.c src\host.c src\content.c src\jar.c src\jar_inflate.c src\firmware.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Fe%SGHEMU_GUI_OUT% /link %GUI_LFLAGS% /MACHINE:X86 /SUBSYSTEM:WINDOWS,6.01 /MANIFEST:EMBED /MANIFESTINPUT:src\gui.manifest user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib uuid.lib bcrypt.lib version.lib winmm.lib windowscodecs.lib ole32.lib uuid.lib ws2_32.lib winhttp.lib
 if errorlevel 1 exit /b 1
+if /i "%~2"=="gui-only" exit /b 0
 cl %CFLAGS% tests\gui_profile_test.c src\userfs.c src\nvram.c src\host.c src\content.c src\jar.c src\jar_inflate.c src\firmware.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Febuild\gui_profile_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01 /MANIFEST:EMBED /MANIFESTINPUT:src\gui.manifest user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib uuid.lib bcrypt.lib version.lib winmm.lib windowscodecs.lib ole32.lib uuid.lib ws2_32.lib winhttp.lib
 if errorlevel 1 exit /b 1
 build\gui_profile_test.exe
@@ -135,6 +148,10 @@ if errorlevel 1 exit /b 1
 cl %CFLAGS% tests\machine_test.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Febuild\machine_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01 bcrypt.lib version.lib winmm.lib ws2_32.lib winhttp.lib
 if errorlevel 1 exit /b 1
 build\machine_test.exe
+if errorlevel 1 exit /b 1
+cl %CFLAGS% tests\machine_run_test.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Febuild\machine_run_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01 bcrypt.lib version.lib winmm.lib ws2_32.lib winhttp.lib
+if errorlevel 1 exit /b 1
+build\machine_run_test.exe
 if errorlevel 1 exit /b 1
 cl %CFLAGS% tests\c100_identity_test.c src\machine.c src\lp_timer.c src\cellular.c src\phone_net.c src\wap_gateway.c src\wap_http.c src\phone_io.c src\rtc.c src\battery.c src\dsp_mailbox.c src\gpio.c src\keypad.c src\sim.c src\sim_card.c src\sds_uart.c src\sds_dma.c src\ma3.c src\ma5_hw.c src\irom.c src\flash.c src\lcd.c src\intc.c src\pmic.c src\arm7.c src\bus.c src\file.c /Febuild\c100_identity_test.exe /link %LFLAGS% /MACHINE:X86 /SUBSYSTEM:CONSOLE,6.01 bcrypt.lib version.lib winmm.lib ws2_32.lib winhttp.lib
 if errorlevel 1 exit /b 1

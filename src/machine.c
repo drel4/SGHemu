@@ -682,6 +682,61 @@ int machine_step(Machine *m, int continuation)
     if (m->bus.fault) { if (!continuation) return 0; m->bus.fault = 0; }
     return 1;
 }
+static void run_stop(uint32_t stops[64],uint32_t pc)
+{
+    unsigned bit=(pc>>1)&2047u;if(pc)stops[bit>>5]|=1u<<(bit&31);
+}
+static uint64_t earlier(uint64_t a,uint64_t b){return a<b?a:b;}
+unsigned machine_run(Machine *m,unsigned count,int continuation)
+{
+    if(count<2)return count&&machine_step(m,continuation)?1u:0u;
+    uint32_t stops[64]={0};unsigned done=0,i;
+    uint32_t hooks[]={m->cellular.ready,m->cellular.poll,m->cellular.radio_select,
+        m->cellular.name_lookup,m->cellular.dial,m->cellular.accept,m->cellular.disconnect,
+        m->cellular.sms_send,m->cellular.sms_reply,m->cellular.alert_request,
+        m->network.txn_start,m->network.send_pdu,m->network.recv_pdu,m->network.bearer_state,
+        m->network.post_event,m->phone_io.tone_entry,m->phone_io.tone_stop,m->phone_io.gpio_entry,
+        m->java_buffer_get,m->java_buffer_set,m->battery.gpio};
+    /* Build from live bindings, not a firmware-specific PC guess. Bloom
+       collisions merely take the reference path; they cannot miss a hook. */
+    for(i=0;i<sizeof(hooks)/sizeof(hooks[0]);++i)run_stop(stops,hooks[i]);
+    for(i=0;i<m->irom.count;++i)run_stop(stops,m->irom.services[i].address);
+    while(done<count){uint32_t epoch=m->bus.device_epoch;uint64_t ns_due=UINT64_MAX,cycle_due=UINT64_MAX;
+        if(!machine_step(m,continuation))return done;++done;
+        if(epoch!=m->bus.device_epoch||m->cellular.stage||m->battery.stage||m->guest_busy||
+           (m->battery.enabled&&!m->battery.adc)||m->audio.ops->advance||m->bus.access_log)continue;
+        /* Between callbacks, no device state changes before these deadlines.
+           The normal path still delivers events BEFORE the next instruction,
+           on precisely the same step as machine_step, even after an overshoot. */
+        if(m->sim.attached)cycle_due=earlier(cycle_due,m->sim.next_event);
+        if(m->sds_dma.attached)cycle_due=earlier(cycle_due,m->sds_dma.next_event);
+        if(m->lp_timer.attached)ns_due=earlier(ns_due,m->lp_timer.next_event);
+        if(m->battery.complete_port)ns_due=earlier(ns_due,m->battery.complete_due);
+        if(m->phone_io.output&&!m->phone_io.mixed)ns_due=earlier(ns_due,m->phone_io.last_ns+1000000u);
+        if(m->ma3.hw){uint64_t due=m->ma3.next_sample;
+            if(m->ma3.water)due=earlier(due,m->ma3.water_next);
+            if(m->clock.attached)ns_due=earlier(ns_due,due);else cycle_due=earlier(cycle_due,due);
+        }
+        if(m->intc.attached&&m->intc.period&&(m->intc.enabled&m->intc.periodic_bit)){
+            if(m->periodic_time)ns_due=earlier(ns_due,m->intc.next_tick);
+            else cycle_due=earlier(cycle_due,m->intc.next_tick);
+        }
+        while(done<count&&m->clock.nanoseconds<ns_due&&m->cpu.cycles<cycle_due){
+            unsigned bit=(m->cpu.r[15]>>1)&2047u;
+            if(stops[bit>>5]&(1u<<(bit&31)))break;
+            /* The reference controller slides a disabled periodic deadline
+               every step. Preserve that state too, not just delivered IRQs. */
+            if(m->intc.attached&&m->intc.period&&!(m->intc.enabled&m->intc.periodic_bit))
+                m->intc.next_tick=(m->periodic_time?m->clock.nanoseconds:m->cpu.cycles)+m->intc.period;
+            if(!arm7_step(&m->cpu))return done;
+            if(m->clock.attached)clock_advance(&m->clock,m->cpu.clock_cycles);
+            if(m->bus.fault){if(!continuation)return done;m->bus.fault=0;}
+            ++done;
+            if(epoch!=m->bus.device_epoch)break;
+        }
+    }
+    return done;
+}
 void machine_key(Machine *m, unsigned key, int down)
 {
     if (key >= SGH_MAX_KEYS) return;
