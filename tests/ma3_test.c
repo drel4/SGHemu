@@ -168,6 +168,24 @@ int main(void)
         ma3_advance(&m,t+95);CHECK(frames==before);
         ma3_advance(&m,t+96);CHECK(frames==before+96);
         ma3_advance(&m,t+480);CHECK(frames==before+480);}
+    /* Deadline arithmetic must match the old per-step accumulator at every
+       step, including non-integral sample periods and live block changes. */
+    {static const uint32_t rates[]={48000,23400000,1000000000};unsigned r;
+      for(r=0;r<3;++r){uint64_t t=0,last=0,fraction=0,pending=0;unsigned j,expected=frames;
+        m.ticks_hz=rates[r];m.last_tick=m.fractional=m.pending_frames=m.next_sample=0;
+        for(j=0;j<10000;++j){uint64_t scaled;unsigned block;
+          if(j%67==0)CHECK(ma3_set_block(&m,j%3==0?16:j%3==1?96:480));
+          t+=(j%97==0?rates[r]/1000:1+(j*17)%701);block=m.block_frames;
+          scaled=fraction+(t-last)*48000;last=t;
+          if(scaled<rates[r])fraction=scaled;
+          else {pending+=scaled/rates[r];fraction=scaled%rates[r];
+            while(pending>=block){expected+=block;pending-=block;}}
+          ma3_advance(&m,t);
+          CHECK(frames==expected);CHECK(m.pending_frames==pending);
+          CHECK(m.fractional+(t-m.last_tick)*48000==fraction);
+        }
+      }
+    }
     ma3_destroy(&m);CHECK(!m.hw);bus_destroy(&bus);
     printf("MA-3: %u checks passed\n",checks);return 0;
 }

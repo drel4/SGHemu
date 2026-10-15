@@ -8,6 +8,8 @@ int irom_add(Irom *rom, uint32_t address, const char *name)
     else if (!strcmp(name, "version")) kind = IROM_VERSION;
     else return 0;
     for (i = 0; i < rom->count; ++i) if (rom->services[i].address == address) return 0;
+    if(!rom->count||address<rom->first_address)rom->first_address=address;
+    if(!rom->count||address>rom->last_address)rom->last_address=address;
     rom->services[rom->count].address = address; rom->services[rom->count++].kind = kind;
     return 1;
 }

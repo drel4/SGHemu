@@ -2,11 +2,12 @@
 
 ## Result and use
 
-C100XEDA2, C100XEDD1 and C100XEDK1 each execute 41 SIM commands and reach
+C100XEDA2, C100XEDD1 and C100XEDK1 initialize the virtual SIM and reach
 the guest's normal standby screen: wallpaper, **No Service**, Menu and Name.
 The guest performs its own card reset, parsing, file reads and UI transition.
 No MMI state, guest RAM identity or standby pixels are injected by the host.
-Radio/network registration is not implemented, so No Service is expected.
+XEDK1 now also has a configurable high-level virtual carrier; the other
+profiles still have no operator registration. See [cellular support](c100-cellular.md).
 With the card absent, XEDK1 returns to **Insert SIM Card**.
 
 The three bring-up profiles use:
@@ -33,8 +34,11 @@ partially changing the card identity.
 GUI: **Emulation > Virtual SIM inserted (reset)** toggles presence and cold
 resets, preserving running/paused state. CLI: `--sim present` or `--sim none`.
 The GUI switch was checked in both directions using the native menu. Phone
-NVM remains autosaved; SIM file writes are currently volatile and lost on
-machine reload. Resetting only the card protocol preserves those file writes.
+NVM remains autosaved. User-writable SIM EFs are saved automatically alongside
+that firmware's NVM, with a `.sim` suffix, and loaded on reset/startup. Each
+SIM snapshot is bound to IMSI/ICCID and CRC-validated before applying any data.
+A rejected snapshot stops loading and is not overwritten. Protocol reset still
+preserves the in-memory SIM files.
 
 ## Driver evidence
 
@@ -96,17 +100,21 @@ follow the relevant GSM SIM structures in
 [ETSI TS 100 977 V8.14.0 (GSM 11.11)](https://www.etsi.org/deliver/etsi_ts/100900_100999/100977/08.14.00_60/ts_100977v081400p.pdf).
 
 This is a minimal boot card, not full SIM conformance. PIN1 is disabled;
-optional services are not advertised. Authentication, PIN operations and
+SMS and SMS-parameter storage services are advertised. Authentication, PIN operations and
 toolkit commands return unsupported-command status rather than fabricated
-authentication results. There is no GSM radio, operator registration or
-SIM-file persistence. Phone NVM and SIM storage are separate devices.
+authentication results. There is no physical GSM radio or subscriber authentication. The XEDK1 virtual
+carrier supplies synthetic registration and local call/SMS completions. Phone
+NVM and persistent SIM storage remain separate devices. EF_SMS has ten 176-byte
+records; EF_SMSP supplies a synthetic service-centre number. Incoming host SMS
+are single-part UCS-2 (up to 70 characters, without surrogate pairs).
 
 ## Verification
 
-`build.cmd` runs 135 synthetic SIM checks (813 checks across the project):
+`build.cmd release` runs the synthetic SIM/card/transport tests, including:
 APDU framing, file selection/metadata/encoding, read/write boundaries,
 configuration validation, reset, timer/UART IRQ behavior, RX/TX DMA,
-threshold completion and invalid DMA targets.
+threshold completion, invalid DMA targets, SMS-DELIVER encoding, record
+exhaustion, storage reload, CRC rejection and identity mismatch rejection.
 
 The optional real-ROM regression takes a completed read-only phone-NVM
 snapshot, executes 100 million instructions, checks transport completion,
@@ -117,7 +125,8 @@ and saves guest LCD pixels:
 .\build\c100_sim_test.exe models/c100/c100xedk1-bringup.cfg COMPLETED.snv none build/sim-k1-none.bmp
 ```
 
-Local results: inserted A2/DD1/K1 each completed 41 APDUs and 450 DMA bytes;
+Historical boot-only results before SMS services: inserted A2/DD1/K1 each
+completed 41 APDUs and 450 DMA bytes;
 their captures show normal standby. Absent K1 completed no APDUs and shows
 Insert SIM Card. Captures/logs are ignored `build/sim-*-present.*` and
 `build/sim-k1-none.*`. A separate fresh erased-NVM A2 run completed both

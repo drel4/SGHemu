@@ -81,8 +81,10 @@ All ranges below use an **exclusive** end address.
 | `0x00041300..0x00041310` | SIM timer Set/Suspend/Resume routines | Instruction-time timeout, IRQ source 0; timing uncalibrated |
 | `0x00040520..0x00040540` | SIM DMA driver | Byte DMA to/from guest RAM, threshold IRQ source 10 |
 | `0x00040800`–`0x00040805` | Active-low keypad matrix | Control, row drive, column sense; guest scanning/debounce |
-| `0x0004028E` | Charger GPIO | Explicit idle input fixture in bring-up profiles |
-| MA-3, calibrated timers/DSP/ADC | Not yet implemented | Unknown accesses logged |
+| `0x0004028C`, `0x0004028E` | GPIO data banks A/B | Masked output writes, physical RGB LED and active-low charger input |
+| `0x00040700..0x00040708` | Low-power oscillator/counter | Calibration IRQ 4 and wake comparator IRQ 25; fine phase remains unimplemented |
+| `0x00060000..0x00060800`, `0x00040910` | ARM/DSP exchange window and handshake | ADC mux/read subset with pipelined results; not a full DSP |
+| Full DSP/RF and remaining analog peripherals | Not yet implemented | Unknown accesses/unsupported mailbox opcodes logged |
 
 ### RAM initialization
 

@@ -6,6 +6,7 @@ typedef struct {
     Bus *bus; Intc *intc; Ma5Hw *hw;
     uint32_t base, irq_mask, ticks_hz, sequence_quantum_ns;
     uint64_t last_tick, fractional, pending_frames, reads, writes, fifo_bytes, irq_events;
+    uint64_t next_sample; /* no sample-time arithmetic before this deadline */
     unsigned selector, control; int attached;
     uint8_t parameter_ram[0x400];
     uint32_t packet_address, packet_length, packet_start, packet_total;

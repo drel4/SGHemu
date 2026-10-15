@@ -5,6 +5,7 @@
 #include "flash.h"
 #include "lcd.h"
 #include "intc.h"
+#include "lp_timer.h"
 #include "pmic.h"
 #include "irom.h"
 #include "keypad.h"
@@ -15,6 +16,8 @@
 #include "rtc.h"
 #include "battery.h"
 #include "phone_io.h"
+#include "cellular.h"
+#include "phone_net.h"
 #define SGH_MAX_IDENTITIES 16
 #define SGH_MAX_KEYS 22
 /* Set before machine_load to open the factory/service path: attaches the
@@ -38,6 +41,7 @@ typedef struct {
 typedef struct {
     Bus bus;
     Arm7 cpu;
+    Arm7Cache *decode_cache; /* owns CPU cache; parked CPU copies only its pointer */
     Audio audio;
     uint32_t reset;
     char name[160], config_path[1024], error[256];
@@ -62,8 +66,13 @@ typedef struct {
        and the allocator, name search and file writer the guest itself runs. */
     uint32_t import_trigger, import_alloc, import_search, import_write;
     uint32_t java_ready, java_globals, java_set_jar, java_send_ui, java_message, java_min_instructions;
+    /* Optional compatibility extension, not additional real-phone RAM. */
+    uint32_t java_buffer_get,java_buffer_set,java_buffer_table,java_buffer_base,java_buffer_size;
+    uint8_t *java_buffer_data;
+    int java_extended;
     Lcd lcd;
     Intc intc;
+    LpTimer lp_timer;
     Pmic pmic;
     Irom irom;
     Keypad keypad;
@@ -74,7 +83,13 @@ typedef struct {
     PhoneClock clock;
     PhoneRtc rtc;
     Battery battery;
+    GpioPort gpio_ports[5];
+    unsigned gpio_count;
+    DspMailbox dsp_mailbox;
     PhoneIo phone_io;
+    Cellular cellular;
+    PhoneNetwork network;
+    int guest_busy;
     int periodic_time;
     uint32_t fs_header, fs_table, fs_capacity, fs_stride;
     uint32_t irq_gate_address, irq_gate_mask;

@@ -7,7 +7,9 @@ static void reset_parameters(Ma3 *m)
     memset(m->parameter_ram,0,sizeof(m->parameter_ram));
     memset(m->parameter_ram+0x90,0x60,16);memset(m->parameter_ram+0xa0,0x3c,16);
     memset(m->parameter_ram+0x14a,0x40,8);
-    m->led_token=m->led_on=m->led_color=0;m->led_tick=0;
+    /* Color history belongs to the host indicator, not MA parameter RAM.
+       Keep it through chip resets (for example when switching songs). */
+    m->led_token=m->led_on=0;m->led_tick=0;
     m->packet_phase=m->address_bytes=m->length_bytes=m->response_mask=0;
     m->packet_address=m->packet_length=0;
     m->delayed_length=m->delayed_phase=m->delayed_address=m->delayed_count=m->delayed_count_bytes=0;
@@ -56,7 +58,11 @@ static void led_update(Ma3 *m)
     if(token==m->led_token)return;
     m->led_token=token;m->led_on=token&1;m->led_tick=m->bus->ticks;++m->led_events;
     if(m->led_on){unsigned x=m->led_rng?m->led_rng:0x6d2b79f5u;
-        x^=x<<13;x^=x>>17;x^=x<<5;m->led_rng=x;m->led_color=colors[x&3];}
+        unsigned choices[4],count=0,i;
+        /* Keep the last lit color across off events. Choose directly from
+           the remaining palette so consecutive on events cannot repeat. */
+        for(i=0;i<4;++i)if(colors[i]!=m->led_color)choices[count++]=colors[i];
+        x^=x<<13;x^=x>>17;x^=x<<5;m->led_rng=x;m->led_color=choices[x%count];}
 }
 static void immediate_parameter(Ma3 *m,unsigned address,unsigned value)
 {
@@ -300,13 +306,16 @@ void ma3_advance(Ma3 *m,uint64_t ticks)
     uint64_t scaled;
     unsigned block=m->block_frames?m->block_frames:480;
     if(!m->hw)return;
-    scaled=m->fractional+(ticks-m->last_tick)*48000;m->last_tick=ticks;
-    if(scaled<m->ticks_hz)m->fractional=scaled; /* under one frame: no division needed */
-    else {
+    if(ticks>=m->next_sample) {
+      scaled=m->fractional+(ticks-m->last_tick)*48000;m->last_tick=ticks;
+      if(scaled<m->ticks_hz)m->fractional=scaled;
+      else {
         m->pending_frames+=scaled/m->ticks_hz;m->fractional=scaled%m->ticks_hz;
         /* The backend stages short blocks into 10 ms sound-card buffers. */
         while(m->pending_frames>=block){unsigned count=block;
             if(!ma5_hw_generate(m->hw,count)){strcpy(m->error,"Hardware PCM generation/output failed");return;}m->pending_frames-=count;}
+      }
+      m->next_sample=ticks+(m->ticks_hz-m->fractional+47999)/48000;
     }
     led_update(m);
     if(ma5_hw_irq(m->hw)){m->intc->pending|=m->irq_mask;++m->irq_events;}

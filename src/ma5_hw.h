@@ -2,6 +2,9 @@
 #define SGH_MA5_HW_H
 #include <stdint.h>
 typedef struct Ma5Hw Ma5Hw;
+typedef struct { uint64_t commands,generate_ticks,other_ticks; } Ma5HwProfile;
+void ma5_hw_profile_enable(Ma5Hw *hw,int enabled);
+Ma5HwProfile ma5_hw_profile(Ma5Hw *hw);
 typedef void (*Ma5PcmMixer)(void *,int16_t *,int16_t *,unsigned);
 typedef struct { uint64_t frames, nonzero, callbacks, underruns, adpcm_refreshes; unsigned peak; int failed; } Ma5HwStats;
 /* All DLL entry points, including load/init/terminate, run on one worker. */
@@ -14,6 +17,7 @@ int ma5_hw_generate(Ma5Hw *hw, unsigned frames);
 /* Install between synchronous commands; callback executes only on the worker. */
 void ma5_hw_set_mixer(Ma5Hw *hw,Ma5PcmMixer mixer,void *context);
 void ma5_hw_pump(Ma5Hw *hw);
+void ma5_hw_set_detune(Ma5Hw *hw,int enabled);
 void ma5_hw_pause(Ma5Hw *hw, int paused);
 void ma5_hw_reset(Ma5Hw *hw);
 void ma5_hw_parameter(Ma5Hw *hw,unsigned address,unsigned value);

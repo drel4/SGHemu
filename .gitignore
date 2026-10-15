@@ -35,3 +35,6 @@
 # Local diagnostic output and Python caches
 *.log
 __pycache__/
+
+# Persistent virtual SIM contents
+*.sim

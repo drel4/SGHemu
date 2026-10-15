@@ -98,14 +98,17 @@ static void clock_advance(PhoneClock *c,uint64_t cycles)
        identical remainder. Same result as the division, none of its cost
        (64-bit division is a library call in an x86 build). */
     if(delta<33&&c->arm_hz&&c->fraction<c->arm_hz) {
-        uint64_t fraction;
+        uint32_t fraction,previous_fraction;
         if(c->table_hz!=c->arm_hz) {
             unsigned i;
             for(i=0;i<33;++i){uint64_t s=(uint64_t)i*1000000000u;c->step_ns[i]=s/c->arm_hz;c->step_rem[i]=(uint32_t)(s%c->arm_hz);}
             c->table_hz=c->arm_hz;
         }
-        fraction=c->fraction+c->step_rem[delta];c->nanoseconds+=c->step_ns[delta];
-        if(fraction>=c->arm_hz){fraction-=c->arm_hz;++c->nanoseconds;}
+        previous_fraction=(uint32_t)c->fraction;fraction=previous_fraction+c->step_rem[delta];
+        c->nanoseconds+=c->step_ns[delta];
+        /* Both operands are below hz. Carry-aware subtraction is exact even
+           above 2 GHz, without a 64-bit addition/comparison on x86. */
+        if(fraction<previous_fraction||fraction>=c->arm_hz){fraction-=c->arm_hz;++c->nanoseconds;}
         c->fraction=fraction;return;
     }
     scaled=delta*1000000000+c->fraction;
@@ -114,8 +117,9 @@ static void clock_advance(PhoneClock *c,uint64_t cycles)
 void machine_destroy(Machine *m)
 {
     if (m->audio.ops) m->audio.ops->stop(&m->audio);
+    phone_net_close(&m->network);
     ma3_destroy(&m->ma3);
-    phone_io_close(&m->phone_io); bus_destroy(&m->bus); free(m->pixels); free(m->unplaced_rom); memset(m, 0, sizeof(*m));
+    arm7_cache_destroy(m->decode_cache);phone_io_close(&m->phone_io); bus_destroy(&m->bus); free(m->pixels); free(m->unplaced_rom); memset(m, 0, sizeof(*m));
 }
 int machine_load(Machine *m, const char *path, const char *rom_override, FILE *log)
 {
@@ -128,7 +132,7 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
     char line[2048];
     unsigned line_no = 0;
     int rom = 0, reset_set = 0, valid = 1, second_used = 0;
-    machine_destroy(m);
+    machine_destroy(m);cellular_init(&m->cellular);
     m->bus.log = log; m->audio = audio_silent(); m->width = 128; m->height = 128;
     if (strlen(path) >= sizeof(m->config_path)) { strcpy(m->error, "Model path is too long"); return 0; }
     strcpy(m->config_path, path);
@@ -143,19 +147,24 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
         if (!*key || *key == '#') continue;
         value = strchr(key, '='); if (!value) { valid = 0; break; }
         *value++ = 0; key = trim(key); value = trim(value);
-        if(!strcmp(key,"phone_io")){
-            unsigned count=0;char *part=value;uint32_t fields[7];
-            while(part&&count<7){char *next=strchr(part,',');if(next)*next++=0;
+        if(!strcmp(key,"phone_io")||!strcmp(key,"phone_tones")){
+            unsigned count=0,expected=!strcmp(key,"phone_tones")?3u:7u;char *part=value;uint32_t fields[7];
+            while(part&&count<expected){char *next=strchr(part,',');if(next)*next++=0;
                 if(!number(trim(part),&fields[count++])){valid=0;break;}part=next;}
-            if(!valid||count!=7||part){valid=0;break;}
+            if(!valid||count!=expected||part){valid=0;break;}
             m->phone_io.tone_entry=fields[0];m->phone_io.tone_stop=fields[1];
-            m->phone_io.tone_table=fields[2];m->phone_io.gpio_entry=fields[3];
-            m->phone_io.led_pins[0]=fields[4];m->phone_io.led_pins[1]=fields[5];m->phone_io.led_pins[2]=fields[6];
+            m->phone_io.tone_table=fields[2];
+            if(expected==7){m->phone_io.gpio_entry=fields[3];
+                if(!m->phone_io.hardware_led){m->phone_io.led_pins[0]=fields[4];m->phone_io.led_pins[1]=fields[5];m->phone_io.led_pins[2]=fields[6];}}
             m->phone_io.configured=1;continue;
         }
         if (!strcmp(key, "name")) { if (strlen(value) >= sizeof(m->name)) { valid = 0; break; } strcpy(m->name, value); continue; }
         if (!strcmp(key, "reset")) { if (!number(value, &m->reset)) { valid = 0; break; } reset_set = 1; continue; }
         if (!strcmp(key, "audio")) { if (strcmp(value, "silent")) { valid = 0; break; } continue; }
+        if(!strcmp(key,"cellular_select")){
+            if(m->cellular.radio_select||!number(value,&base)||!base||(base&1)){valid=0;break;}
+            m->cellular.radio_select=base;continue;
+        }
         if (!strcmp(key, "sim_present")) {
             uint32_t present;
             if (!m->sim.attached || !number(value,&present) || present>1) { valid=0; break; }
@@ -250,6 +259,51 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             if(!valid||(fields[0]&3)||(fields[1]&1)||(fields[2]&1)){valid=0;break;}
             m->java_ready=base;m->java_globals=fields[0];m->java_set_jar=fields[1];
             m->java_send_ui=fields[2];m->java_message=fields[3];m->java_min_instructions=fields[4];
+        } else if (!strcmp(key,"cellular")) {
+            uint32_t fields[8];unsigned j;char *part=comma;
+            if(m->cellular.ready||!base||(base&1)){valid=0;break;}
+            for(j=0;j<8;++j){char *next=strchr(part,',');
+                if((j<7&&!next)||(j==7&&next)){valid=0;break;}if(next)*next++=0;
+                if(!number(part,&fields[j])||!fields[j]){valid=0;break;}part=next;}
+            if(!valid){break;}for(j=0;j<7;++j)if(fields[j]&1)valid=0;
+            if(!valid||(fields[7]&3)){valid=0;break;}
+            m->cellular.ready=base;m->cellular.alloc=fields[0];m->cellular.release=fields[1];
+            m->cellular.send_ui=fields[2];m->cellular.dial=fields[3];m->cellular.accept=fields[4];
+            m->cellular.disconnect=fields[5];m->cellular.name_lookup=fields[6];m->cellular.services=fields[7];
+        } else if (!strcmp(key,"cellular_alert")) {
+            if(!base||(base&1)||m->cellular.alert_request||!number(comma,&size)||size){valid=0;break;}m->cellular.alert_request=base;
+        } else if (!strcmp(key,"cellular_poll")) {
+            if(!base||(base&1)||m->cellular.poll||!number(comma,&size)||size){valid=0;break;}m->cellular.poll=base;
+        } else if (!strcmp(key,"wap")) {
+            uint32_t fields[7];unsigned j;char *part=comma;
+            if(m->network.txn_start||!base||(base&1)){valid=0;break;}
+            for(j=0;j<7;++j){char *next=strchr(part,',');
+                if((j<6&&!next)||(j==6&&next)){valid=0;break;}if(next)*next++=0;
+                if(!number(part,&fields[j])||!fields[j]){valid=0;break;}part=next;}
+            if(!valid)break;for(j=0;j<5;++j)if(fields[j]&1)valid=0;
+            if(!valid||(fields[5]&3)||(fields[6]&3)){valid=0;break;}
+            m->network.txn_start=base;m->network.send_pdu=fields[0];m->network.recv_pdu=fields[1];
+            m->network.bearer_state=fields[2];m->network.post_event=fields[3];m->network.data_arrived=fields[4];
+            m->network.wap_base=fields[5];m->network.driver_base=fields[6];
+        } else if (!strcmp(key,"cellular_sms")) {
+            uint32_t fields[3];unsigned j;char *part=comma;
+            if(m->cellular.sms_send||!base||(base&1)){valid=0;break;}
+            for(j=0;j<3;++j){char *next=strchr(part,',');
+                if((j<2&&!next)||(j==2&&next)){valid=0;break;}if(next)*next++=0;
+                if(!number(part,&fields[j])||!fields[j]){valid=0;break;}part=next;}
+            if(!valid||(fields[0]&1)||(fields[1]&1)||(fields[2]&3)){valid=0;break;}
+            m->cellular.sms_send=base;m->cellular.sms_reply=fields[0];m->cellular.send_message=fields[1];m->cellular.sr_task=fields[2];
+        } else if (!strcmp(key,"java_buffers")) {
+            uint32_t fields[4];unsigned j;char *part=comma;
+            if(m->java_buffer_get||!base||(base&1)){valid=0;break;}
+            for(j=0;j<4;++j){char *next=strchr(part,',');
+                if((j<3&&!next)||(j==3&&next)){valid=0;break;}if(next)*next++=0;
+                if(!number(part,&fields[j])||!fields[j]){valid=0;break;}part=next;}
+            if(!valid||(fields[0]&1)||(fields[1]&3)||(fields[2]&3)||
+                fields[3]>0x100000u||(fields[3]&3)||
+                (uint64_t)fields[2]+3u*fields[3]>UINT64_C(0x100000000)){valid=0;break;}
+            m->java_buffer_get=base;m->java_buffer_set=fields[0];m->java_buffer_table=fields[1];
+            m->java_buffer_base=fields[2];m->java_buffer_size=fields[3];
         } else if (!strcmp(key, "nvram")) {
             if (m->nvram_size || !number(comma, &size) || !size || (base & 1) || (size & 1)) { valid = 0; break; }
             m->nvram_base = base; m->nvram_size = size;
@@ -259,6 +313,46 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             if(!last){valid=0;break;}*last++=0;
             if(!base||!number(comma,&size)||!number(next,&capacity)||!number(last,&stride)||!capacity||capacity>100||stride!=28){valid=0;break;}
             m->fs_header=base;m->fs_table=size;m->fs_capacity=capacity;m->fs_stride=stride;
+        } else if (!strcmp(key,"lp_timer")) {
+            uint32_t fields[4];unsigned j;char *part=comma;
+            for(j=0;j<4;++j){char *next=strchr(part,',');if((j<3&&!next)||(j==3&&next)){valid=0;break;}
+                if(next)*next++=0;if(!number(trim(part),&fields[j])){valid=0;break;}part=next;}
+            if(!valid||!lp_timer_attach(&m->lp_timer,&m->bus,&m->intc,&m->clock.nanoseconds,
+                base,fields[0],fields[1],fields[2],fields[3])){valid=0;break;}
+        } else if (!strcmp(key,"dsp_mailbox")) {
+            if(!number(comma,&size)||!dsp_mailbox_attach(&m->dsp_mailbox,&m->bus,base,size)){valid=0;break;}
+        } else if (!strcmp(key,"battery_adc")) {
+            char *next=strchr(comma,',');uint32_t temperature;
+            if(m->battery.enabled||!m->dsp_mailbox.attached||!next){valid=0;break;}*next++=0;
+            if(base>255||!number(comma,&size)||size>255||base>size||!number(next,&temperature)||temperature>255){valid=0;break;}
+            m->battery.adc=&m->dsp_mailbox;m->battery.adc_empty=base;m->battery.adc_full=size;
+            m->battery.adc_temperature=temperature;m->battery.enabled=1;
+            battery_set(&m->battery,100,0);
+        } else if (!strcmp(key,"gpio_port")) {
+            if(m->gpio_count==5||!number(comma,&size)||!gpio_port_attach(&m->gpio_ports[m->gpio_count],&m->bus,base,size)){valid=0;break;}
+            ++m->gpio_count;
+        } else if (!strcmp(key,"gpio_led")) {
+            uint32_t pins[3];unsigned j;char *part=comma;GpioPort *port=NULL;
+            for(j=0;j<m->gpio_count;++j)if(m->gpio_ports[j].base==base)port=&m->gpio_ports[j];
+            if(!port||m->phone_io.hardware_led){valid=0;break;}
+            for(j=0;j<3;++j){char *next=strchr(part,',');if((j<2&&!next)||(j==2&&next)){valid=0;break;}
+                if(next)*next++=0;if(!number(part,&pins[j])||pins[j]>=8){valid=0;break;}part=next;}
+            if(!valid||pins[0]==pins[1]||pins[0]==pins[2]||pins[1]==pins[2]){valid=0;break;}
+            for(j=0;j<3;++j)m->phone_io.led_pins[j]=pins[j];
+            m->phone_io.hardware_led=1;port->output_changed=phone_io_gpio_write;port->output_context=&m->phone_io;
+            phone_io_gpio_write(&m->phone_io,255,port->output,0);
+        } else if (!strcmp(key,"charger_input")) {
+            if(!m->gpio_count||!m->intc.attached||m->battery.charger_port||base>=8||
+                !number(comma,&size)||size>=32){valid=0;break;}
+            m->battery.charger_port=&m->gpio_ports[m->gpio_count-1];m->battery.charger_intc=&m->intc;
+            m->battery.charger_bit=base;m->battery.charger_irq=size;
+            gpio_port_input(m->battery.charger_port,base,!m->battery.charging);
+        } else if (!strcmp(key,"battery_report")) {
+            char *next=strchr(comma,',');uint32_t report;
+            if(m->battery.enabled||!base||(base&1)||!next){valid=0;break;}*next++=0;
+            if(!number(comma,&size)||!size||(size&1)||!number(next,&report)||!report||(report&1)){valid=0;break;}
+            m->battery.ready=base;m->battery.alloc=size;m->battery.report=report;
+            m->battery.enabled=1;m->battery.percent=100;m->battery.level_pending=1;
         } else if (!strcmp(key,"battery_guest")) {
             uint32_t fields[5];unsigned j;char *part=comma;
             if(m->battery.enabled||!base||(base&1)){valid=0;break;}
@@ -370,7 +464,7 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             if (!bus_device(&m->bus, base, 2, identity_read, identity_write, id)) { valid = 0; break; }
         } else { valid = 0; break; }
     }
-    if (ferror(f)) valid = 0;
+    if (ferror(f)||(m->lp_timer.attached&&!m->clock.attached)) valid = 0;
     fclose(f);
     if (valid) {
         unsigned i, j;
@@ -383,6 +477,39 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             }
         }
     }
+    if(valid&&(m->cellular.ready||m->cellular.sms_send||m->network.txn_start||m->cellular.poll)){
+        unsigned i,j;uint32_t code[]={m->cellular.ready,m->cellular.alloc,m->cellular.release,
+            m->cellular.send_ui,m->cellular.dial,m->cellular.accept,m->cellular.disconnect,
+            m->cellular.name_lookup,m->cellular.sms_send,m->cellular.sms_reply,m->cellular.send_message,
+            m->cellular.radio_select,m->cellular.alert_request,m->cellular.poll,m->network.txn_start,m->network.send_pdu,m->network.recv_pdu,
+            m->network.bearer_state,m->network.post_event,m->network.data_arrived};
+        uint32_t ram[]={m->cellular.services,m->cellular.sr_task,m->network.wap_base,m->network.driver_base};
+        const unsigned sizes[]={64,4,0x140,20};
+        if(!m->cellular.ready)valid=0;
+        for(i=0;i<sizeof(code)/sizeof(code[0]);++i){int found=0;if(!code[i])continue;
+            for(j=0;j<m->rom_count;++j)if(code[i]>=m->roms[j].base&&
+                (uint64_t)code[i]+2<=(uint64_t)m->roms[j].base+m->roms[j].size)found=1;
+            if(!found)valid=0;}
+        for(i=0;i<4;++i){int found=0;if(!ram[i])continue;
+            for(j=0;j<m->bus.count;++j){Region *r=&m->bus.regions[j];
+                if(r->data&&!r->readonly&&!r->read&&!r->write&&ram[i]>=r->base&&
+                    (uint64_t)ram[i]+sizes[i]<=(uint64_t)r->base+r->size)found=1;}
+            if(!found)valid=0;}
+    }
+    if(valid&&m->java_buffer_get){
+        unsigned i,j;uint32_t entries[2]={m->java_buffer_get,m->java_buffer_set};int table=0;
+        for(i=0;i<2;++i){int found=0;
+            for(j=0;j<m->rom_count;++j)if(entries[i]>=m->roms[j].base&&
+                (uint64_t)entries[i]+2<=(uint64_t)m->roms[j].base+m->roms[j].size)found=1;
+            if(!found)valid=0;}
+        for(i=0;i<m->bus.count;++i){Region *r=&m->bus.regions[i];
+            if(r->data&&!r->readonly&&!r->read&&!r->write&&m->java_buffer_table>=r->base&&
+                (uint64_t)m->java_buffer_table+3u*0x98u<=(uint64_t)r->base+r->size)table=1;
+            if((uint64_t)m->java_buffer_base<(uint64_t)r->base+r->size&&
+                (uint64_t)r->base<(uint64_t)m->java_buffer_base+3u*m->java_buffer_size)valid=0;}
+        if(!table)valid=0;
+    }
+    if(valid&&m->battery.enabled&&!m->battery.detect&&!m->battery.charger_port)valid=0;
     if(valid&&m->periodic_time&&!m->clock.attached)valid=0;
     if (valid && m->nvram_size) {
         unsigned i, j;
@@ -430,35 +557,101 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
         }
         lcd_connect(&m->lcd, m->pixels, m->width, m->height);
     }
-    arm7_reset(&m->cpu, &m->bus, m->reset); m->loaded = 1;
+    arm7_reset(&m->cpu, &m->bus, m->reset);
+    m->decode_cache=arm7_cache_create();m->cpu.cache=m->decode_cache; /* allocation failure uses uncached decoding */
+    m->loaded = 1;
     if (!*m->name) strcpy(m->name, "SGH model");
     return 1;
+}
+/* Only the recovered Java working-buffer helpers are extended. The native
+   compiler, file format, registry, flash writer and VM still run unchanged.
+   Disabled by default: these larger buffers are an emulator compatibility
+   feature, not a claim about the C100's physical memory or package limits. */
+static int java_buffer_step(Machine *m)
+{
+    Arm7 *c=&m->cpu;unsigned handle=c->r[0];uint32_t pc=c->r[15],lr=c->r[14];
+    if(!m->java_extended||!m->java_buffer_get||handle>=3||
+        (pc!=m->java_buffer_get&&pc!=m->java_buffer_set))return 0;
+    if(!(c->cpsr&ARM_T)){c->halted=1;c->error="Java buffer helper: expected Thumb";return -1;}
+    if(!m->java_buffer_data){
+        uint8_t *data=calloc(3u,m->java_buffer_size);
+        if(!data||!bus_map(&m->bus,m->java_buffer_base,3u*m->java_buffer_size,data,0,1)){
+            free(data);c->halted=1;c->error="Cannot map extended Java working buffers";return -1;}
+        m->java_buffer_data=data;
+    }
+    if(pc==m->java_buffer_set){
+        memset(m->java_buffer_data+(size_t)handle*m->java_buffer_size,0,m->java_buffer_size);
+        bus_write(&m->bus,m->java_buffer_table+handle*0x98u+0x94u,4,
+            m->java_buffer_base+handle*m->java_buffer_size);
+        if(m->bus.fault){c->halted=1;c->error="Java working-buffer table is not writable";return -1;}
+        c->r[0]=1;
+    }else c->r[0]=m->java_buffer_size;
+    c->cpsr=(c->cpsr&~ARM_T)|((lr&1)?ARM_T:0);
+    c->r[15]=lr&((lr&1)?~1u:~3u);++c->instructions;++c->cycles;return 1;
 }
 int machine_step(Machine *m, int continuation)
 {
     int hle = 0;
     uint64_t previous_clocks=m->cpu.clock_cycles;
     if (!m->loaded || m->cpu.halted) return 0;
-    phone_io_advance(&m->phone_io,m->clock.nanoseconds);
-    phone_io_observe(&m->phone_io,&m->cpu);
-    sim_advance(&m->sim,m->cpu.cycles);
-    sds_dma_advance(&m->sds_dma,m->cpu.cycles);
-    ma3_advance(&m->ma3,m->clock.attached?m->clock.nanoseconds:m->cpu.cycles);
+    /* Host queues can only inject at these native scheduler/event-loop entries.
+       Do not take the networking thread lock on every interpreted instruction. */
+    if(m->cellular.stage||m->cpu.r[15]==m->cellular.ready||
+        (m->cellular.poll&&m->cpu.r[15]==m->cellular.poll)){
+        if(!m->cellular.boot_ready&&m->sim.card.commands){unsigned i;
+            /* This native startup query follows loading the handset UI records,
+               also used by first-boot provisioning to recognize settled defaults. */
+            for(i=0;i<m->irom.count;++i)if(m->irom.services[i].kind==IROM_VERSION&&m->irom.services[i].calls){
+                m->cellular.boot_ready=1;break;
+            }
+        }
+        if(!m->cellular.stage)phone_net_advance(&m->network,&m->cellular);
+        if(!cellular_advance(&m->cellular,&m->cpu,m->guest_busy||m->battery.stage,m->sim.present)){
+            m->cpu.error=m->cellular.error;m->cpu.halted=1;return 0;
+        }
+    }
+    if(m->phone_io.output&&!m->phone_io.mixed)phone_io_advance(&m->phone_io,m->clock.nanoseconds);
+    if((m->cpu.cpsr&ARM_T)&&(m->cpu.r[15]==m->phone_io.tone_entry||
+        m->cpu.r[15]==m->phone_io.tone_stop||m->cpu.r[15]==m->phone_io.gpio_entry))
+        phone_io_observe(&m->phone_io,&m->cpu);
+    sim_tick(&m->sim,m->cpu.cycles);
+    if(m->sds_dma.attached&&m->cpu.cycles>=m->sds_dma.next_event)sds_dma_advance(&m->sds_dma,m->cpu.cycles);
+    if(m->ma3.hw)ma3_advance(&m->ma3,m->clock.attached?m->clock.nanoseconds:m->cpu.cycles);
     if (*m->ma3.error) { m->cpu.halted=1; m->cpu.error=m->ma3.error; return 0; }
+    if(m->lp_timer.attached&&(m->clock.nanoseconds>=m->lp_timer.next_event||
+        ((m->intc.enabled&m->lp_timer.cal_mask)!=m->lp_timer.observed_enabled)))lp_timer_advance(&m->lp_timer);
     intc_advance_time(&m->intc, &m->cpu,m->periodic_time?m->clock.nanoseconds:m->cpu.cycles);
     /* Sample the hardware latch, not a synthetic guest bus access. Pending
        sources remain latched while firmware critical sections close the gate. */
     if (m->irq_gate_register && !((m->irq_gate_register->value >>
         ((m->irq_gate_address - m->irq_gate_register->address) * 8)) & m->irq_gate_mask)) m->cpu.irq = 0;
     if (m->bus.fault) { if (!continuation) return 0; m->bus.fault = 0; }
+    /* Multi-step host-injected native calls borrow a parked task's CPU state.
+       Treat that transaction as atomic: an IRQ-driven task switch can otherwise
+       reuse its stack before caller restoration. Device latches/timers continue
+       advancing; pending IRQ/FIQ is delivered immediately after the return. */
+    if(m->cellular.stage)m->cpu.irq=m->cpu.fiq=0;
     /* Exceptions take precedence over an atomic HLE call, just as over an
        instruction fetch. Never return from the service instead of entering IRQ. */
     if (!((m->cpu.fiq && !(m->cpu.cpsr & 0x40u)) || (m->cpu.irq && !(m->cpu.cpsr & 0x80u))))
-        {hle=battery_gpio(&m->battery,&m->cpu);if(!hle)hle=irom_step(&m->irom,&m->cpu);}
+        {
+            uint32_t pc=m->cpu.r[15];PhoneNetwork *n=&m->network;Cellular *s=&m->cellular;
+            /* Keep packet/event stack frames off the interpreter's normal path. */
+            if((m->cpu.cpsr&ARM_T)&&n->txn_start&&
+                (pc==n->txn_start||pc==n->send_pdu||pc==n->recv_pdu||pc==n->bearer_state))
+                hle=phone_net_hle(n,s,&m->cpu);
+            if(!hle&&(m->cpu.cpsr&ARM_T)&&s->enabled&&s->ready&&
+                (pc==s->radio_select||pc==s->name_lookup||pc==s->dial||pc==s->accept||
+                 pc==s->disconnect||pc==s->sms_send||pc==s->sms_reply||pc==s->alert_request))
+                hle=cellular_hle(s,&m->cpu);
+            if(!hle&&m->java_extended&&(pc==m->java_buffer_get||pc==m->java_buffer_set))hle=java_buffer_step(m);
+            if(!hle&&m->battery.enabled&&pc==m->battery.gpio)hle=battery_gpio(&m->battery,&m->cpu);
+            if(!hle&&irom_may_call(&m->irom,pc))hle=irom_step(&m->irom,&m->cpu);
+        }
     if (hle < 0 || (!hle && !arm7_step(&m->cpu))) return 0;
     if(hle&&m->cpu.clock_cycles==previous_clocks)++m->cpu.clock_cycles; /* Atomic HLE timing remains provisional. */
     if(m->clock.attached)clock_advance(&m->clock,m->cpu.clock_cycles);
-    m->audio.ops->advance(&m->audio, m->cpu.cycles);
+    if(m->audio.ops->advance)m->audio.ops->advance(&m->audio, m->cpu.cycles);
     if (m->bus.fault) { if (!continuation) return 0; m->bus.fault = 0; }
     return 1;
 }

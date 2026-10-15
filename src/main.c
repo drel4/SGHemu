@@ -11,6 +11,7 @@ int main(int argc, char **argv)
 {
     Machine m = {0};
     NvramStore storage = {0};
+    char sim_storage[1100]={0};
     ContentImport content = {0};
     uint64_t budget = 100000;
     unsigned i;
@@ -21,7 +22,7 @@ int main(int argc, char **argv)
     const char *model;
     const char *lcd_output = NULL;
     const char *import_path = NULL;
-    int java_menu=0,rtc_sync=0,high_priority=0,charging=0;
+    int java_menu=0,rtc_sync=0,high_priority=0,charging=0,java_extended=0;
     unsigned battery_percent=100;
     const char *fs_output=NULL;
     const char *nv_input = NULL, *nv_output = NULL;
@@ -32,7 +33,7 @@ int main(int argc, char **argv)
     FirmwareMatch *matches = NULL;
     unsigned first_argument = 2;
     FILE *trace = NULL, *access_log = NULL, *log;
-    if (argc < 2) { puts("sghemu MODEL.cfg | --folder PATH [instruction-budget] [--lcd-out FILE.bmp]\nOptions: --continue-unmapped --trace --mmio-trace --until ADDRESS --service\n         --nv-load FILE.snv --nv-save FILE.snv (diagnostic import/export)\n         --state-dir DIRECTORY --no-persist --sim present|none\n         --ma5-hw M5_EmuHw.dll [--audio-wav FILE.wav]\n         --audio-ticks-hz N (legacy profiles only, not CPU MHz)\n         --fs-list FILE.tsv (directory metadata, not file contents)\n         --import FILE (sound/picture or MIDP 1.0 JAR through the guest)\n         --java-menu (boot the native installed-MIDlet menu)\n         --rtc-sync --high-priority --battery 0..100 --charging\nNVM auto-loads/saves beside the model config in state/. Run from repo root; see build/unmapped.log."); return 2; }
+    if (argc < 2) { puts("sghemu MODEL.cfg | --folder PATH [instruction-budget] [--lcd-out FILE.bmp]\nOptions: --continue-unmapped --trace --mmio-trace --until ADDRESS --service\n         --nv-load FILE.snv --nv-save FILE.snv (diagnostic import/export)\n         --state-dir DIRECTORY --no-persist --sim present|none\n         --ma5-hw M5_EmuHw.dll [--audio-wav FILE.wav]\n         --audio-ticks-hz N (legacy profiles only, not CPU MHz)\n         --fs-list FILE.tsv (directory metadata, not file contents)\n         --import FILE (sound/picture or MIDP 1.0 JAR through the guest)\n         --java-menu (boot the native installed-MIDlet menu)\n         --extended-java (optional larger Java working buffers)\n         --rtc-sync --high-priority --battery 0..100 --charging\nNVM auto-loads/saves beside the model config in state/. Run from repo root; see build/unmapped.log."); return 2; }
     model = argv[1];
     if (!strcmp(model, "--folder")) {
         unsigned count;
@@ -59,6 +60,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--battery")&&i+1<(unsigned)argc){char *end;unsigned long n=strtoul(argv[++i],&end,10);
             if(*end||n>100){fprintf(stderr,"Battery percentage must be 0..100.\n");return 2;}battery_percent=(unsigned)n;}
         else if (!strcmp(argv[i], "--java-menu")) java_menu=1;
+        else if (!strcmp(argv[i], "--extended-java")) java_extended=1;
         else if (!strcmp(argv[i], "--import") && i + 1 < (unsigned)argc) import_path = argv[++i];
         else if (!strcmp(argv[i], "--service")) sgh_service_mode = 1;
         else if (!strcmp(argv[i],"--sim") && i+1<(unsigned)argc) {
@@ -92,16 +94,20 @@ int main(int argc, char **argv)
     if (!log) { if (trace) fclose(trace); return 1; }
     if (!machine_load_pair(&m, model, matches ? matches[0].rom[0] : NULL, matches ? matches[0].rom[1] : NULL, log)) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
     if(high_priority&&!host_high_priority(1)){fprintf(stderr,"Windows rejected High process priority.\n");result=1;goto done;}
+    m.java_extended=java_extended;
+    if(java_extended&&!m.java_buffer_get){fprintf(stderr,"This model has no extended Java buffer profile.\n");result=1;goto done;}
     if(rtc_sync&&!host_sync_rtc(&m.rtc)){fprintf(stderr,"Host RTC sync unavailable: model has no RTC or date is outside its year range.\n");result=1;goto done;}
     if(rtc_sync)rtc_set_sync(&m.rtc,1);
     battery_set(&m.battery,battery_percent,charging);
     if(sim_override>=0) {if(!m.sim.attached){fprintf(stderr,"This model has no SIM interface\n");result=1;goto done;}m.sim.present=sim_override;}
     if (persistent && !nvram_store_open(&storage, &m, state_directory)) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
     storage_ready = 1;
+    if(storage.active&&m.sim.attached){snprintf(sim_storage,sizeof(sim_storage),"%s.sim",storage.path);
+        if(!sim_card_load_storage(&m.sim.card,sim_storage)){*sim_storage=0;fprintf(stderr,"%s\n",m.sim.card.error);result=1;goto done;}}
     if (nv_input && !(persistent ? nvram_store_import(&storage, &m, nv_input) : nvram_load(&m, nv_input))) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
     if (import_path && !storage.active) { fprintf(stderr, "Content import needs the persistent phone directory; boot once so the guest initializes it, then import.\n"); result = 1; goto done; }
     if (import_path && !content_import_open(&content, &m, import_path)) { fprintf(stderr, "%s\n", content.error); result = 1; goto done; }
-    if(import_path&&!budget_set&&content.type==10)budget=900000000;
+    if(import_path&&!budget_set&&content.type==10)budget=1800000000;
     if(java_menu&&import_path){fprintf(stderr,"Use --java-menu or --import, not both.\n");result=1;goto done;}
     if(java_menu&&!content_java_menu(&content,&m)){fprintf(stderr,"%s\n",content.error);result=1;goto done;}
     if(java_menu&&!budget_set)budget=600000000;
@@ -153,9 +159,11 @@ int main(int argc, char **argv)
             int initialize_defaults = storage.provision && storage.stage == 3;
             puts(initialize_defaults ? "Guest format and initialization marker saved; cold-resetting to create defaults." :
                 "Guest UI defaults complete and saved; cold-resetting for normal startup.");
+            if(*sim_storage&&!sim_card_save_storage(&m.sim.card,sim_storage)){fprintf(stderr,"%s\n",m.sim.card.error);result=1;break;}
             nvram_store_release(&storage);
             if (!machine_load_pair(&m, model, matches ? matches[0].rom[0] : NULL, matches ? matches[0].rom[1] : NULL, log) ||
                 !nvram_store_open(&storage, &m, state_directory)) { fprintf(stderr, "%s\n", m.error); storage_ready = 0; result = 1; break; }
+            if(*sim_storage&&!sim_card_load_storage(&m.sim.card,sim_storage)){*sim_storage=0;fprintf(stderr,"%s\n",m.sim.card.error);result=1;break;}
             storage.defaults_boot = initialize_defaults;
             if(sim_override>=0)m.sim.present=sim_override;
             battery_set(&m.battery,battery_percent,charging);
@@ -171,9 +179,9 @@ int main(int argc, char **argv)
             continue;
         }
         if (until_set && m.cpu.r[15] == until) { printf("Address breakpoint reached: %08x\n", until); break; }
-        if((m.battery.stage||!(content.active&&!content.done&&!content.failed))&&!battery_step(&m.battery,&m.cpu)){
+        if(!m.cellular.stage&&(m.battery.stage||!(content.active&&!content.done&&!content.failed))&&!battery_step(&m.battery,&m.cpu)){
             fprintf(stderr,"Guest battery event failed.\n");result=1;break;}
-        if (!m.battery.stage && content.active && !content.done && !content.failed) {
+        if (!m.cellular.stage && !m.battery.stage && content.active && !content.done && !content.failed) {
             int imported = content_import_step(&content, &m);
             if (!imported) { fprintf(stderr, "%s\n", content.error); result = 1; break; }
             if (imported == 2 && content.type==10) puts(content.size ? "Java installer started; wait for the handset installation result." : "Native Java menu started.");
@@ -221,6 +229,7 @@ int main(int argc, char **argv)
     if (m.bus.fault) puts("Stopped on unknown hardware; see build/unmapped.log. This is not a successful phone boot.");
 done:
     if (storage_ready && !nvram_store_flush(&storage, &m)) { fprintf(stderr, "%s\n", m.error); result = 1; }
+    if(*sim_storage&&!sim_card_save_storage(&m.sim.card,sim_storage)){fprintf(stderr,"%s\n",m.sim.card.error);result=1;}
     nvram_store_release(&storage); content_import_release(&content);
     if (trace) fclose(trace); machine_destroy(&m); if (access_log) fclose(access_log); fclose(log); free(matches); return result;
 }

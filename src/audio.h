@@ -10,17 +10,16 @@ typedef struct {
     int (*play)(Audio *, const uint8_t *, size_t, unsigned);
     int (*stop)(Audio *);
     int (*volume)(Audio *, unsigned);
-    void (*advance)(Audio *, uint64_t);
+    void (*advance)(Audio *, uint64_t); /* optional: NULL when no timed work exists */
 } AudioOps;
 struct Audio { const AudioOps *ops; void *state; };
 static inline int audio_silent_play(Audio *a, const uint8_t *p, size_t n, unsigned loops)
 { (void)a; (void)p; (void)n; (void)loops; return 1; }
 static inline int audio_silent_stop(Audio *a) { (void)a; return 1; }
 static inline int audio_silent_volume(Audio *a, unsigned volume) { (void)a; return volume <= 127; }
-static inline void audio_silent_advance(Audio *a, uint64_t ticks) { (void)a; (void)ticks; }
 static inline Audio audio_silent(void)
 {
-    static const AudioOps ops = { audio_silent_play, audio_silent_stop, audio_silent_volume, audio_silent_advance };
+    static const AudioOps ops = { audio_silent_play, audio_silent_stop, audio_silent_volume, NULL };
     Audio a = { &ops, NULL }; return a;
 }
 #endif

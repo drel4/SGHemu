@@ -29,6 +29,10 @@ int main(void)
     CHECK(irom_add(&rom, 0x8077c, "memcpy")); CHECK(!irom_add(&rom, 0x8077c, "memcpy"));
     CHECK(!irom_add(&rom, 0x81fe1, "version")); CHECK(!irom_add(&rom, 0x81fe0, "unknown"));
     CHECK(irom_add(&rom, 0x81fe0, "version")); rom.version = 0x1234; rom.version_return = 0x2000; rom.version_configured = 1;
+    CHECK(!irom_may_call(&rom,0x8077a)&&irom_may_call(&rom,0x8077c));
+    CHECK(irom_may_call(&rom,0x81fe0)&&!irom_may_call(&rom,0x81fe2));
+    {Irom bounds={0};CHECK(!irom_may_call(&bounds,0));CHECK(irom_add(&bounds,UINT32_MAX-1,"memcpy"));
+      CHECK(irom_add(&bounds,0,"version"));CHECK(irom_may_call(&bounds,0)&&irom_may_call(&bounds,UINT32_MAX-1));}
     reset(&c, &bus, 0x8077c); flags = c.cpsr;
     c.r[0] = 0x1001; c.r[1] = 0x2003; c.r[2] = 17;
     CHECK(irom_step(&rom, &c) == 1); CHECK(!memcmp(ram + 1, source + 3, 17)); CHECK(ram[0] == 0xcc && ram[18] == 0xcc);

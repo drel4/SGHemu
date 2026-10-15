@@ -18,6 +18,7 @@ static uint32_t uart_read(void *ctx, uint32_t off, unsigned width)
     if (off == 10 && s->card.response_size && (s->regs[2] & 8)) {
         uint8_t byte;
         sim_card_receive(&s->card,&byte); value=byte; ++s->received;
+        s->next_event=0;
         s->regs[2] &= 0xfff7u; s->rx_due = s->bus->ticks + 1000;
         return value;
     }
@@ -30,6 +31,7 @@ static void uart_write(void *ctx, uint32_t off, unsigned width, uint32_t value)
     Sim *s = ctx; uint16_t old = s->regs[0]; unsigned shift = (off & 1u)*8;
     if ((width != 1 && width != 2 && width != 4) || (off & 1u)+width > (width == 4 ? 4u : 2u) ||
         (width == 4 && (off & 3u))) { bus_fault_access(s->bus,1,s->base+off,width,value,"invalid SIM UART access"); return; }
+    s->next_event=0;
     if (off == 8) { s->tx = (uint8_t)value; s->tx_due=s->bus->ticks+500; s->regs[2]&=0xffefu; ++s->transmitted; }
     s->regs[off/2] = (uint16_t)((s->regs[off/2] & ~(mask(width == 4 ? 2 : width)<<shift)) | (value<<shift));
     if (width == 4) s->regs[off/2+1] = (uint16_t)(value>>16);
@@ -45,6 +47,7 @@ static void block_write(Sim *s, uint32_t *regs, uint32_t base, uint32_t off, uns
 {
     uint32_t bits;
     if ((off & 3u)+width>4) { bus_fault_access(s->bus,1,base+off,width,value,"cross SIM register write"); return; }
+    s->next_event=0;
     bits=mask(width)<<(8*(off&3u)); regs[off/4]=(regs[off/4]&~bits)|((value<<(8*(off&3u)))&bits);
 }
 static uint32_t timer_read(void *ctx,uint32_t off,unsigned width) { Sim *s=ctx; return block_read(s,s->timer,s->timer_base,off,width); }
@@ -76,6 +79,14 @@ int sim_attach(Sim *s,Bus *bus,Intc *intc,uint32_t base,uint32_t timer,uint32_t 
 void sim_advance(Sim *s,uint64_t ticks)
 {
     if (!s->attached) return;
+    /* Status IRQs are level-like: an INTC acknowledgement must not hide one
+       just because no timed SIM event is due. External card/presence changes
+       also wake the scheduler without depending on a UART register write. */
+    if (ticks<s->next_event && s->present==s->scheduled_present &&
+        s->card.response_size==s->scheduled_response) {
+        if (s->regs[2]&s->regs[3]&0x18) s->intc->pending|=8;
+        return;
+    }
     if (s->timer_due && ticks>=s->timer_due) { s->timer_due=0;s->intc->pending|=1; }
     if (s->tx_due && ticks>=s->tx_due) { s->tx_due=0;s->regs[2]|=0x10;if(s->present)sim_card_send(&s->card,s->tx); }
     if (s->present && s->card.response_size && ticks>=s->rx_due && (s->regs[0]&0xb)==0xb) s->regs[2]|=8;
@@ -96,4 +107,11 @@ void sim_advance(Sim *s,uint64_t ticks)
         }
     }
     if (s->regs[2]&s->regs[3]&0x18) s->intc->pending|=8;
+    s->next_event=UINT64_MAX;
+    if(s->timer_due && s->timer_due<s->next_event)s->next_event=s->timer_due;
+    if(s->tx_due && s->tx_due<s->next_event)s->next_event=s->tx_due;
+    if(s->present && s->card.response_size && (s->regs[0]&0xb)==0xb &&
+        !(s->regs[2]&8) && s->rx_due<s->next_event)s->next_event=s->rx_due;
+    if(s->present && (s->dma[0]&1) && s->dma_due<s->next_event)s->next_event=s->dma_due;
+    s->scheduled_present=s->present;s->scheduled_response=s->card.response_size;
 }

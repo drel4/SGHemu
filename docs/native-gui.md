@@ -43,9 +43,23 @@ separately autosaved. See [SIM evidence and limitations](c100-sim.md).
 |---|---|
 | Run / Pause / Step | F5 / F6 / F10 |
 | Reset/reload, paused | Ctrl+R |
+| Toggle English multi-tap text input | Ctrl+T |
 | Soft keys, Call / End | F1 / F2, F3 / F4 |
 | Navigation / OK | Arrows / Enter or Space |
 | Digits / Star / Hash / Back | Number keys, Shift+8, Shift+3, Backspace |
+
+**Emulation > Keyboard text input (abc/ABC)** enables PC letters, spaces and
+periods in a phone text field. First select the handset's English abc/ABC mode,
+not predictive T9; capitalization follows that handset mode. Letters are queued
+as real numeric keypad taps, then Right commits each character immediately.
+For example, `abc` generates `2, Right, 2, 2, Right, 2, 2, 2, Right`.
+Both press and release intervals are 60 ms of emulated time. Typing is asynchronous;
+wait for the LCD to catch up, or press Enter/a softkey to queue it after the text.
+Numbers still act as direct numeric keypad presses, not literal digit insertion.
+Space becomes the phone's space key while this option is enabled; Enter remains OK.
+Backspace queues Clear; Esc cancels pending input. Focus loss, menu entry, pause
+and reset discard the queue and release all keys. The toggle is saved in
+`state/emulator.ini`; turning it off restores the original direct controls.
 
 Buttons track held/released state and release on focus loss/menu entry. The
 host key state drives the guest-scanned matrix in C100 bring-up profiles. OK is
@@ -79,6 +93,16 @@ PCM blocks use eight output buffers; speaker pacing may extend an execution batc
 The optional INI `ticks_hz` applies only to profiles without a clock model;
 it is interpreter ticks/sec, not physical CPU MHz.
 See [audio evidence and limitations](ma5-audio.md).
+
+LCD ghosting captures a target only after LCD commands/writes have been quiet
+for 3 ms of guest time. Intermediate clears and partially drawn frames therefore
+do not enter the 75-ms response filter. Painting composes the background and LCD
+offscreen and presents them together, with background erasure suppressed to avoid
+flashy frames. Guest pixels and exported screenshots are unaffected.
+
+L&F also provides the saved, default-off **C100 MA detune (-12.5 cents)** option.
+It changes Yamaha output live without resetting the phone; other phone models
+and CPU/navigation tones are unaffected.
 
 Build target is MSVC 2026 x86 C17 with `/W4 /WX /RTC1` and Win7-compatible
 Win32/GDI/common-control APIs. Common Controls v6/DPI manifest is embedded.

@@ -48,6 +48,7 @@ static void block_write(void *ctx, uint32_t off, unsigned width, uint32_t value)
     unsigned shift;
     if (width != 1 && width != 2 && width != 4) return;
     if (off + width > DMA_USED) return;
+    c->owner->next_event = 0;
     shift = 8 * (off & 3u);
     mask = width >= 4 ? 0xffffffffu : ((1u << (width * 8)) - 1u);
     word = field(c, off);
@@ -86,6 +87,7 @@ int sds_dma_attach(SdsDma *d, Bus *bus, SdsUart *serial, uint32_t base, unsigned
     for (i = 0; i < channels; ++i) {
         SdsDmaChannel *c = &d->channel[i];
         c->bus = bus;
+        c->owner = d;
         c->base = base + i * SDS_DMA_CHANNEL_STRIDE;
         if (bus_device(bus, c->base, SDS_DMA_CHANNEL_STRIDE, block_read, block_write, c)) ++d->registered;
     }
@@ -127,10 +129,14 @@ static void advance_channel(SdsDma *d, SdsDmaChannel *c, uint64_t now)
 void sds_dma_advance(SdsDma *d, uint64_t now)
 {
     unsigned i;
-    if (!d->attached) return;
+    if (!d->attached || now < d->next_event) return;
+    d->next_event = UINT64_MAX;
     for (i = 0; i < d->channels; ++i) {
         SdsDmaChannel *c = &d->channel[i];
         if (!c->running) continue;
         advance_channel(d, c, now);
+        /* A due RX channel with no byte deliberately remains due. A byte
+           arriving through another device must be seen on the next step. */
+        if (c->next_due < d->next_event) d->next_event = c->next_due;
     }
 }

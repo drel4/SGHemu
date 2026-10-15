@@ -6,6 +6,7 @@
 #define ARM_C 0x20000000u
 #define ARM_V 0x10000000u
 #define ARM_T 0x20u
+typedef struct Arm7Cache Arm7Cache;
 typedef struct {
     uint32_t r[16], cpsr;
     uint32_t bank[6][2], spsr[6], user_hi[5], fiq_hi[5];
@@ -15,7 +16,10 @@ typedef struct {
     int halted, irq, fiq;
     const char *error;
     Bus *bus;
+    Arm7Cache *cache; /* borrowed; no guest state or address-dependent values */
 } Arm7;
+Arm7Cache *arm7_cache_create(void);
+void arm7_cache_destroy(Arm7Cache *cache);
 void arm7_reset(Arm7 *cpu, Bus *bus, uint32_t pc);
 int arm7_step(Arm7 *cpu);
 int arm7_set_cpsr(Arm7 *cpu, uint32_t value);

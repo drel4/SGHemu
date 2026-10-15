@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 static void put(SimCard *c,unsigned byte)
 {
     if (c->response_size==sizeof(c->response)) { c->overflow=1; return; }
@@ -55,7 +57,9 @@ static void populate(SimCard *c)
     f=add(c,0x6f05,0x7f20,2,0,255);f->data[0]=1; /* English GSM language index. */
     add(c,0x6f20,0x7f20,9,0,255);add(c,0x6f30,0x7f20,24,0,255);
     f=add(c,0x6f31,0x7f20,1,0,0);f->data[0]=10;
-    add(c,0x6f38,0x7f20,16,0,0); /* Optional services not advertised yet. */
+    f=add(c,0x6f38,0x7f20,16,0,0);
+    f->data[0]=0xc0; /* Service 4: SMS storage, allocated and activated. */
+    f->data[2]=0xc0; /* Service 12: SMS parameters. */
     f=add(c,0x6f46,0x7f20,17,0,255);f->data[0]=0;memcpy(f->data+1,c->spn,strlen(c->spn));
     add(c,0x6f74,0x7f20,16,0,255);
     f=add(c,0x6f78,0x7f20,2,0,0);f->data[1]=1;
@@ -64,7 +68,12 @@ static void populate(SimCard *c)
     f=add(c,0x6fb7,0x7f20,3,0,255);f->data[0]=0x11;f->data[1]=0xf2;f->data[2]=0xff; /* ECC 112. */
     add(c,0x6f3a,0x7f10,320,32,255);f=add(c,0x6f3c,0x7f10,1760,176,255);
     for(i=0;i<10;++i)f->data[i*176]=0; /* Free SMS records. */
-    add(c,0x6f40,0x7f10,32,32,255);add(c,0x6f42,0x7f10,40,40,255);
+    add(c,0x6f40,0x7f10,32,32,255);f=add(c,0x6f42,0x7f10,40,40,255);
+    memcpy(f->data,"SGHemu SMS",10);f->data[12]=0xfd; /* Only service centre is present. */
+    f->data[25]=7;f->data[26]=0x91;
+    f->data[27]=0x00;f->data[28]=0x00;f->data[29]=0x00;f->data[30]=0x00;f->data[31]=0x00;f->data[32]=0xf1;
+    f=add(c,0x6f43,0x7f10,2,0,255);f->data[0]=0; /* Last used TP-MR; memory available. */
+    c->dirty=1;
     sim_card_reset(c);
 }
 void sim_card_init(SimCard *c)
@@ -117,7 +126,7 @@ static void execute(SimCard *c)
             c->record=(uint16_t)rec;offset=(rec-1)*f->record;
         }
         if(offset+length>f->size){status(c,0x9402);return;}
-        if(ins==0xd6||ins==0xdc)memcpy(f->data+offset,c->command+5,length);
+        if(ins==0xd6||ins==0xdc){memcpy(f->data+offset,c->command+5,length);c->dirty=1;}
         else {put(c,ins);for(i=0;i<length;++i)put(c,f->data[offset+i]);}
         status(c,0x9000);return;
     }
@@ -142,4 +151,64 @@ void sim_card_send(SimCard *c,uint8_t byte)
         }
         execute(c);
     } else if(c->command_size==5+c->input_size) execute(c);
+}
+
+/* SIM storage is separate from phone NVM. Serialize only user-writable EFs,
+   bind it to the configured card identity, and validate before applying. */
+static const uint16_t storage_ids[]={0x6f3a,0x6f3c,0x6f40,0x6f42,0x6f43};
+static uint32_t storage_crc(const uint8_t *p,size_t n)
+{
+    uint32_t crc=~0u;unsigned k;while(n--){crc^=*p++;for(k=0;k<8;++k)crc=(crc>>1)^((0u-(crc&1u))&0xedb88320u);}return ~crc;
+}
+int sim_card_save_storage(SimCard *c,const char *path)
+{
+    uint8_t bytes[8192]={0};size_t n=48;unsigned i;FILE *f;char temp[1100];uint32_t crc;int ok;
+    if(!c->dirty)return 1;
+    memcpy(bytes,"SGHSIM1",7);memcpy(bytes+8,c->imsi,16);memcpy(bytes+24,c->iccid,21);
+    for(i=0;i<sizeof(storage_ids)/sizeof(storage_ids[0]);++i){SimFile *s=file(c,storage_ids[i],0x7f10);
+        if(!s||n+4+s->size+4>sizeof(bytes)){snprintf(c->error,sizeof(c->error),"Invalid SIM storage layout");return 0;}
+        bytes[n++]=(uint8_t)s->id;bytes[n++]=(uint8_t)(s->id>>8);bytes[n++]=(uint8_t)s->size;bytes[n++]=(uint8_t)(s->size>>8);
+        memcpy(bytes+n,s->data,s->size);n+=s->size;
+    }
+    crc=storage_crc(bytes,n);for(i=0;i<4;++i)bytes[n++]=(uint8_t)(crc>>(i*8));
+    if(strlen(path)+5>=sizeof(temp)){snprintf(c->error,sizeof(c->error),"SIM storage path is too long");return 0;}snprintf(temp,sizeof(temp),"%s.tmp",path);
+    f=fopen(temp,"wb");if(!f){snprintf(c->error,sizeof(c->error),"Could not open SIM storage for writing");return 0;}ok=fwrite(bytes,1,n,f)==n;if(fclose(f))ok=0;
+    if(ok)ok=MoveFileExA(temp,path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+    if(!ok){remove(temp);snprintf(c->error,sizeof(c->error),"Could not save SIM storage");return 0;}
+    c->dirty=0;return 1;
+}
+int sim_card_load_storage(SimCard *c,const char *path)
+{
+    uint8_t bytes[8192];size_t n,pos=48;unsigned i;SimFile *targets[5];size_t offsets[5];FILE *f=fopen(path,"rb");uint32_t crc=0;
+    if(!f){DWORD attr=GetFileAttributesA(path);if(attr==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND)return 1;
+        snprintf(c->error,sizeof(c->error),"Could not open SIM storage");return 0;}
+    n=fread(bytes,1,sizeof(bytes),f);if(ferror(f)||!feof(f)){fclose(f);goto invalid;}if(fclose(f))goto invalid;
+    if(n<52||memcmp(bytes,"SGHSIM1",8)||memcmp(bytes+8,c->imsi,16)||memcmp(bytes+24,c->iccid,21))goto invalid;
+    for(i=0;i<4;++i)crc|=(uint32_t)bytes[n-4+i]<<(i*8);
+    if(storage_crc(bytes,n-4)!=crc)goto invalid;
+    for(i=0;i<5;++i){unsigned id,size;if(pos+4>n-4)goto invalid;
+        id=bytes[pos]|((unsigned)bytes[pos+1]<<8);size=bytes[pos+2]|((unsigned)bytes[pos+3]<<8);pos+=4;
+        if(id!=storage_ids[i]||!(targets[i]=file(c,id,0x7f10))||size!=targets[i]->size||pos+size>n-4)goto invalid;
+        offsets[i]=pos;pos+=size;
+    }
+    if(pos!=n-4)goto invalid;
+    for(i=0;i<5;++i)memcpy(targets[i]->data,bytes+offsets[i],targets[i]->size);
+    c->dirty=0;return 1;
+invalid:snprintf(c->error,sizeof(c->error),"SIM storage is corrupt or belongs to another card");return 0;
+}
+unsigned sim_card_deliver_sms(SimCard *c,const char *sender,const uint16_t *text,unsigned length,const uint8_t scts[7])
+{
+    SimFile *sms=file(c,0x6f3c,0x7f10);uint8_t record[176];unsigned digits=0,i,n=0,slot;const char *number=sender;
+    if(!sms||!sender||!text||!scts||!length||length>70)goto invalid;
+    if(*number=='+')++number;while(number[digits]){if(number[digits]<'0'||number[digits]>'9'||digits==20)goto invalid;++digits;}
+    if(!digits)goto invalid;for(i=0;i<length;++i)if(text[i]>=0xd800&&text[i]<=0xdfff)goto invalid;
+    for(slot=0;slot<(unsigned)sms->size/sms->record;++slot)if(!(sms->data[slot*sms->record]&1u))break;
+    if(slot==(unsigned)sms->size/sms->record){strcpy(c->error,"SIM SMS storage is full");return 0;}
+    memset(record,255,sizeof(record));record[n++]=3;record[n++]=0; /* Unread; default SCA. */
+    record[n++]=4;record[n++]=(uint8_t)digits;record[n++]=sender[0]=='+'?0x91:0x81;
+    for(i=0;i<digits;i+=2)record[n++]=(uint8_t)((number[i]-'0')|((i+1<digits?number[i+1]-'0':15)<<4));
+    record[n++]=0;record[n++]=8;memcpy(record+n,scts,7);n+=7;record[n++]=(uint8_t)(length*2);
+    for(i=0;i<length;++i){record[n++]=(uint8_t)(text[i]>>8);record[n++]=(uint8_t)text[i];}
+    memcpy(sms->data+slot*sms->record,record,sms->record);c->dirty=1;*c->error=0;return slot+1;
+invalid:strcpy(c->error,"SMS needs a numeric sender and 1-70 UCS-2 characters (no emoji)");return 0;
 }

@@ -37,6 +37,31 @@ int main(void)
       n=exchange(c,record,sizeof(record),out);CHECK(n==5&&out[1]=='A'); }
     CHECK(sim_card_load(c,"models/c100/sim/test-sim.cfg"));CHECK(!strcmp(c->imsi,"001010000000001"));
     { FILE *f=fopen("build/sim-invalid.cfg","w");CHECK(f);fputs("spn=changed\nimsi=not-digits\n",f);fclose(f);CHECK(!sim_card_load(c,"build/sim-invalid.cfg"));CHECK(!strcmp(c->spn,"SGHemu"));remove("build/sim-invalid.cfg"); }
+    {
+        SimCard *loaded=calloc(1,sizeof(*loaded));SimFile *sms=NULL;uint16_t message[]={0x0048,0x0438};
+        static const uint8_t timestamp[]={0x62,0x01,0x41,0x21,0,0,0};uint8_t before[176];FILE *f;
+        CHECK(loaded);sim_card_init(loaded);
+        while(sim_card_receive(c,&byte)){}
+        for(i=0;i<c->count;++i)if(c->files[i].id==0x6f3c)sms=&c->files[i];CHECK(sms);
+        CHECK(sim_card_deliver_sms(c,"+79990001122",message,2,timestamp)==1&&c->dirty);
+        memcpy(before,sms->data,176);select_file(c,0x7f10);select_file(c,0x6f3c);
+        {const uint8_t record[]={0xa0,0xb2,1,4,176};n=exchange(c,record,sizeof(record),out);
+         CHECK(n==179&&out[1]==3&&out[2]==0&&out[3]==4&&out[4]==11);
+         CHECK(out[5]==0x91&&out[6]==0x97&&out[12]==0&&out[13]==8);
+         CHECK(out[22]==0&&out[23]==0x48&&out[24]==4&&out[25]==0x38);}
+        CHECK(sim_card_save_storage(c,"build/sim-storage.bin")&&!c->dirty);
+        CHECK(sim_card_load_storage(loaded,"build/sim-storage.bin")&&!loaded->dirty);
+        for(i=0;i<loaded->count;++i)if(loaded->files[i].id==0x6f3c)CHECK(!memcmp(before,loaded->files[i].data,176));
+        CHECK(!sim_card_deliver_sms(c,"bad",message,2,timestamp));CHECK(!memcmp(before,sms->data,176));
+        message[0]=0xd800;CHECK(!sim_card_deliver_sms(c,"+1",message,2,timestamp));message[0]=0x0048;
+        for(i=2;i<=10;++i)CHECK(sim_card_deliver_sms(c,"+1",message,2,timestamp)==i);
+        CHECK(!sim_card_deliver_sms(c,"+1",message,2,timestamp)&&strstr(c->error,"full"));
+        f=fopen("build/sim-storage.bin","r+b");CHECK(f);CHECK(!fseek(f,60,SEEK_SET));CHECK(fputc(0,f)!=EOF);CHECK(!fclose(f));
+        CHECK(!sim_card_load_storage(loaded,"build/sim-storage.bin"));
+        for(i=0;i<loaded->count;++i)if(loaded->files[i].id==0x6f3c)CHECK(!memcmp(before,loaded->files[i].data,176));
+        CHECK(sim_card_save_storage(c,"build/sim-storage.bin"));strcpy(loaded->imsi,"001010000000002");
+        CHECK(!sim_card_load_storage(loaded,"build/sim-storage.bin"));free(loaded);
+    }
     CHECK(intc_attach(&intc,&b,0x40100));CHECK(sim_attach(s,&b,&intc,0x40a80,0x41300,0x40520));
     CHECK(!sim_attach(s,&b,&intc,0x40a80,0x41300,0x40520));CHECK(bus_read(&b,0x40a80,4)==0x20017420);
     bus_write(&b,0x40a80,2,3);bus_write(&b,0x40a80,2,11);sim_advance(s,1000);CHECK(!s->resets&&!s->card.response_size);

@@ -1,5 +1,11 @@
 #include "arm7.h"
 #include <string.h>
+#include <stdlib.h>
+#if defined(_MSC_VER)
+#define ARM7_HOT_INLINE __forceinline
+#else
+#define ARM7_HOT_INLINE inline
+#endif
 static unsigned bank_index(uint32_t mode)
 {
     switch (mode & 31) {
@@ -98,21 +104,13 @@ static uint32_t add_flags(Arm7 *c, uint32_t a, uint32_t b, unsigned ci, int flag
     }
     return v;
 }
-static int cond(const Arm7 *c, unsigned cc)
-{
-    int n = !!(c->cpsr & ARM_N), z = !!(c->cpsr & ARM_Z);
-    int cy = !!(c->cpsr & ARM_C), v = !!(c->cpsr & ARM_V);
-    switch (cc) {
-    case 0: return z; case 1: return !z;
-    case 2: return cy; case 3: return !cy;
-    case 4: return n; case 5: return !n;
-    case 6: return v; case 7: return !v;
-    case 8: return cy && !z; case 9: return !cy || z;
-    case 10: return n == v; case 11: return n != v;
-    case 12: return !z && n == v; case 13: return z || n != v;
-    case 14: return 1; default: return 0;
-    }
-}
+/* Bits index NZCV directly; no runtime condition decoder or flag snapshots. */
+static const uint16_t condition_mask[16]={
+    0xf0f0,0x0f0f,0xcccc,0x3333,0xff00,0x00ff,0xaaaa,0x5555,
+    0x0c0c,0xf3f3,0xaa55,0x55aa,0x0a05,0xf5fa,0xffff,0x0000
+};
+static int cond(const Arm7 *c,unsigned cc)
+{return (condition_mask[cc]>>(c->cpsr>>28))&1;}
 static void pc_write(Arm7 *c, uint32_t v)
 {
     c->r[15] = v & ((c->cpsr & ARM_T) ? ~1u : ~3u);
@@ -155,28 +153,29 @@ static int plain_data_processing(uint32_t op)
     return (op & 0x0c000000u) == 0 && (op & 0x01900000u) != 0x01000000u &&
         ((op & 0x02000000u) || (op & 0x90u) != 0x90u);
 }
-static int arm(Arm7 *c, uint32_t op)
+#include "arm7_decode.inc"
+static int arm(Arm7 *c, uint32_t op,const Decoded *d)
 {
-    unsigned rn = (op >> 16) & 15, rd = (op >> 12) & 15;
-    unsigned rm = op & 15, rs = (op >> 8) & 15, cy = !!(c->cpsr & ARM_C);
+    unsigned rn = d->rn, rd = d->rd;
+    unsigned rm = d->rm, rs = d->rs, cy = !!(c->cpsr & ARM_C);
     uint32_t a, b, v, address;
-    if ((op >> 28) == 15) return fail(c, "ARMv4T NV/reserved instruction");
-    if (!cond(c, op >> 28)) return 1;
-    if (plain_data_processing(op)) goto data_processing; /* the common case: skip seven failed mask tests */
-    /* Bits 27:26 = 01 (LDR/STR) and bits 27:25 = 101 (B/BL) can only be those
-       instructions; every special form tested below lives in the 00x space. */
-    if ((op & 0x0c000000u) == 0x04000000u) goto single_transfer;
-    if ((op & 0x0e000000u) == 0x0a000000u) goto branch;
-    if ((op & 0x0ffffff0u) == 0x012fff10u) { bx(c, reg(c, rm)); return 1; }
-    if ((op & 0x0fbf0fffu) == 0x010f0000u) {
+    switch(d->kind){
+    case A_DP:goto data_processing;case A_SINGLE:goto single_transfer;
+    case A_BRANCH:goto branch;case A_BX:goto a_bx;case A_MRS:goto a_mrs;
+    case A_MSR:goto a_msr;case A_LONG_MUL:goto a_long_mul;case A_MUL:goto a_mul;
+    case A_SWP:goto a_swp;case A_HALF:goto a_half;case A_BLOCK:goto a_block;
+    case A_SWI:goto a_swi;default:goto a_reserved;
+    }
+    a_bx: { bx(c, reg(c, rm)); return 1; }
+    a_mrs: {
         if (rd == 15) return fail(c, "unpredictable MRS pc");
         if ((op & 0x00400000u) && !bank_index(c->cpsr)) return fail(c, "MRS SPSR in user/system mode");
         c->r[rd] = (op & 0x00400000u) ? c->spsr[bank_index(c->cpsr)] : c->cpsr; return 1;
     }
-    if ((op & 0x0fb0fff0u) == 0x0120f000u || (op & 0x0fb0f000u) == 0x0320f000u) {
+    a_msr: {
         uint32_t mask = 0;
         unsigned i, bank = bank_index(c->cpsr);
-        b = (op & 0x02000000u) ? ror(op & 255, ((op >> 8) & 15) * 2) : reg(c, rm);
+        b = (op & 0x02000000u) ? d->immediate : reg(c, rm);
         for (i = 0; i < 4; ++i) if (op & (1u << (16 + i))) mask |= 255u << (8 * i);
         /* ARMv4T: flags and control; reserved bits are preserved. T cannot change via MSR. */
         mask &= (op & 0x00400000u) ? 0xf00000ffu : 0xf00000dfu;
@@ -187,7 +186,7 @@ static int arm(Arm7 *c, uint32_t op)
         if ((c->cpsr & 31) == 0x10) mask &= 0xf0000000u;
         return arm7_set_cpsr(c, (c->cpsr & ~mask) | (b & mask));
     }
-    if ((op & 0x0f8000f0u) == 0x00800090u) {
+    a_long_mul: {
         uint64_t product;
         unsigned hi = rn, lo = rd;
         if (hi == 15 || lo == 15 || rm == 15 || rs == 15 || hi == lo) return fail(c, "unpredictable long multiply");
@@ -198,23 +197,23 @@ static int arm(Arm7 *c, uint32_t op)
         if (op & 0x00100000u) c->cpsr = (c->cpsr & ~(ARM_N | ARM_Z)) | (c->r[hi] & ARM_N) | (!product ? ARM_Z : 0);
         return 1;
     }
-    if ((op & 0x0fc000f0u) == 0x00000090u) {
+    a_mul: {
         if (rn == 15 || rs == 15 || rm == 15 || ((op & 0x00200000u) && rd == 15)) return fail(c, "unpredictable multiply");
         v = c->r[rm] * c->r[rs];
         if (op & 0x00200000u) v += c->r[rd];
         c->r[rn] = v; if (op & 0x00100000u) nz(c, v); return 1;
     }
-    if ((op & 0x0fb00ff0u) == 0x01000090u) {
+    a_swp: {
         unsigned width = (op & 0x00400000u) ? 1u : 4u;
         if (rn == 15 || rd == 15 || rm == 15) return fail(c, "unpredictable SWP");
         address = c->r[rn]; b = c->r[rm];
         v = width == 4 ? load_word(c, address) : bus_read(c->bus, address, 1);
         bus_write(c->bus, width == 4 ? address & ~3u : address, width, b); c->r[rd] = v; return 1;
     }
-    if ((op & 0x0e000090u) == 0x00000090u && (op & 0x60u)) {
+    a_half: {
         unsigned type = (op >> 5) & 3, load = (op >> 20) & 1;
         if (rd == 15 || (rn == 15 && (!(op & 0x01000000u) || (op & 0x00200000u)))) return fail(c, "unpredictable halfword transfer");
-        a = reg(c, rn); b = (op & 0x00400000u) ? ((op >> 4) & 0xf0u) | (op & 15) : reg(c, rm);
+        a = reg(c, rn); b = (op & 0x00400000u) ? d->immediate : reg(c, rm);
         v = (op & 0x00800000u) ? a + b : a - b; address = (op & 0x01000000u) ? v : a;
         if (load) {
             if (type == 1) c->r[rd] = load_half(c, address, 0);
@@ -231,12 +230,12 @@ static int arm(Arm7 *c, uint32_t op)
         return 1;
     }
     data_processing:
-    if ((op & 0x0c000000u) == 0) {
-        unsigned code = (op >> 21) & 15, flags = (op >> 20) & 1;
+    {
+        unsigned code = d->code, flags = (op >> 20) & 1;
         int write = code < 8 || code > 11;
         if (op & 0x02000000u) {
             unsigned rotation = ((op >> 8) & 15) * 2;
-            b = ror(op & 255, rotation); if (rotation) cy = b >> 31;
+            b = d->immediate; if (rotation) cy = b >> 31;
         } else {
             unsigned amount = (op >> 7) & 31;
             b = reg(c, rm);
@@ -273,13 +272,13 @@ static int arm(Arm7 *c, uint32_t op)
         return 1;
     }
     single_transfer:
-    if ((op & 0x0c000000u) == 0x04000000u) {
+    {
         unsigned load = (op >> 20) & 1, width = (op & 0x00400000u) ? 1u : 4u;
         a = reg(c, rn);
         if (op & 0x02000000u) {
             if (op & 0x10u) return fail(c, "reserved transfer shift");
             b = shift(reg(c, rm), (op >> 5) & 3, (op >> 7) & 31, 1, &cy);
-        } else b = op & 0xfffu;
+        } else b = d->immediate;
         v = (op & 0x00800000u) ? a + b : a - b; address = (op & 0x01000000u) ? v : a;
         if (load) {
             b = width == 4 ? load_word(c, address) : bus_read(c->bus, address, width);
@@ -292,14 +291,13 @@ static int arm(Arm7 *c, uint32_t op)
         }
         return 1;
     }
-    if ((op & 0x0e000000u) == 0x08000000u) {
-        unsigned list = op & 0xffffu, count = 0, i, first = 16;
+    a_block: {
+        unsigned list = op & 0xffffu, count = d->count, i, first = d->code;
         unsigned load = (op >> 20) & 1, wb = (op >> 21) & 1, s = (op >> 22) & 1;
         int user = s && (!load || !(list & 0x8000u));
         uint32_t final, loaded_pc = 0;
         int has_pc = 0;
         if (rn == 15) return fail(c, "unpredictable block-transfer base");
-        for (i = 0; i < 16; ++i) if (list & (1u << i)) { ++count; if (first == 16) first = i; }
         a = c->r[rn];
         if (!count) { list = 0x8000; count = 16; first = 15; }
         final = (op & 0x00800000u) ? a + 4 * count : a - 4 * count;
@@ -322,65 +320,98 @@ static int arm(Arm7 *c, uint32_t op)
         return 1;
     }
     branch:
-    if ((op & 0x0e000000u) == 0x0a000000u) {
-        uint32_t offset = (op & 0xffffffu) << 2;
-        if (offset & 0x2000000u) offset |= 0xfc000000u;
+    {
+        uint32_t offset = d->immediate;
         if (op & 0x01000000u) c->r[14] = c->last_pc + 4;
         pc_write(c, c->last_pc + 8 + offset); return 1;
     }
-    if ((op & 0x0f000000u) == 0x0f000000u) { exception(c, 0x13, 8, c->last_pc + 4, 0); return 1; }
-    return fail(c, "unimplemented coprocessor/reserved ARM instruction");
+    a_swi: { exception(c, 0x13, 8, c->last_pc + 4, 0); return 1; }
+    a_reserved:return fail(c, "unimplemented coprocessor/reserved ARM instruction");
 }
-static int thumb(Arm7 *c, uint32_t op)
+static unsigned multiply_cycles(uint32_t value,int signed_value);
+static ARM7_HOT_INLINE int thumb(Arm7 *c, uint32_t op,unsigned *clocks,const Decoded *d)
 {
-    unsigned rd = op & 7, rs = (op >> 3) & 7, rn = (op >> 6) & 7;
+    unsigned rd = d->rd, rs = d->rs, rn = d->rn;
     unsigned code, cy = !!(c->cpsr & ARM_C), i;
     uint32_t a, b, v, address;
-    if ((op & 0xf800u) == 0x1800u) {
+    *clocks=d->clocks;
+    switch(d->kind){
+    case T_SHIFT:goto t_shift;
+    case T_ADDSUB:goto t_addsub;
+    case T_MOV_IMM:goto t_mov_imm;case T_CMP_IMM:goto t_cmp_imm;
+    case T_ADD_IMM:goto t_add_imm;case T_SUB_IMM:goto t_sub_imm;
+    case T_HIGH_ADD:goto t_high_add;case T_HIGH_CMP:goto t_high_cmp;
+    case T_HIGH_MOV:goto t_high_mov;case T_HIGH_BX:goto t_high_bx;
+    case T_NOP:return 1;
+    case T_ALU_AND:goto t_alu_and;
+    case T_ALU_EOR:goto t_alu_eor;
+    case T_ALU_LSL:goto t_alu_lsl;
+    case T_ALU_LSR:goto t_alu_lsr;
+    case T_ALU_ASR:goto t_alu_asr;
+    case T_ALU_ADC:goto t_alu_adc;
+    case T_ALU_SBC:goto t_alu_sbc;
+    case T_ALU_ROR:goto t_alu_ror;
+    case T_ALU_TST:goto t_alu_tst;
+    case T_ALU_NEG:goto t_alu_neg;
+    case T_ALU_CMP:goto t_alu_cmp;
+    case T_ALU_CMN:goto t_alu_cmn;
+    case T_ALU_ORR:goto t_alu_orr;
+    case T_ALU_MUL:goto t_alu_mul;
+    case T_ALU_BIC:goto t_alu_bic;
+    case T_ALU_MVN:goto t_alu_mvn;
+    case T_LITERAL:goto t_literal;
+    case T_REGISTER_MEMORY:goto t_register_memory;
+    case T_IMMEDIATE_MEMORY:goto t_immediate_memory;
+    case T_HALF:goto t_half;
+    case T_SP_MEMORY:goto t_sp_memory;
+    case T_ADDRESS:goto t_address;
+    case T_SP_ADD:goto t_sp_add;
+    case T_PUSHPOP:goto t_pushpop;
+    case T_MULTIPLE:goto t_multiple;
+    case T_CONDITIONAL:goto t_conditional;
+    case T_BRANCH:goto t_branch;
+    case T_BL_PREFIX:goto t_bl_prefix;
+    case T_BL_SUFFIX:goto t_bl_suffix;
+    default:goto t_reserved;
+    }
+    t_addsub: {
         a = c->r[rs]; b = (op & 0x400u) ? rn : c->r[rn];
         c->r[rd] = (op & 0x200u) ? add_flags(c, a, ~b, 1, 1) : add_flags(c, a, b, 0, 1); return 1;
     }
-    if ((op & 0xe000u) == 0) {
-        v = shift(c->r[rs], (op >> 11) & 3, (op >> 6) & 31, 1, &cy);
+    t_shift: {
+        v = shift(c->r[rs], d->code, d->immediate, 1, &cy);
         c->r[rd] = v; nz(c, v); carry(c, cy); return 1;
     }
-    if ((op & 0xe000u) == 0x2000u) {
-        rd = (op >> 8) & 7; b = op & 255; a = c->r[rd]; code = (op >> 11) & 3;
-        if (!code) { c->r[rd] = b; nz(c, b); }
-        else if (code == 1) (void)add_flags(c, a, ~b, 1, 1);
-        else c->r[rd] = code == 2 ? add_flags(c, a, b, 0, 1) : add_flags(c, a, ~b, 1, 1);
-        return 1;
+    t_mov_imm:c->r[rd]=d->immediate;nz(c,d->immediate);return 1;
+    t_cmp_imm:(void)add_flags(c,c->r[rd],~d->immediate,1,1);return 1;
+    t_add_imm:c->r[rd]=add_flags(c,c->r[rd],d->immediate,0,1);return 1;
+    t_sub_imm:c->r[rd]=add_flags(c,c->r[rd],~d->immediate,1,1);return 1;
+    t_alu_and:v=c->r[rd]&c->r[rs];goto t_alu_result;
+    t_alu_eor:v=c->r[rd]^c->r[rs];goto t_alu_result;
+    t_alu_lsl:v=shift(c->r[rd],0,c->r[rs]&255,0,&cy);carry(c,cy);goto t_alu_result;
+    t_alu_lsr:v=shift(c->r[rd],1,c->r[rs]&255,0,&cy);carry(c,cy);goto t_alu_result;
+    t_alu_asr:v=shift(c->r[rd],2,c->r[rs]&255,0,&cy);carry(c,cy);goto t_alu_result;
+    t_alu_adc:c->r[rd]=add_flags(c,c->r[rd],c->r[rs],cy,1);return 1;
+    t_alu_sbc:c->r[rd]=add_flags(c,c->r[rd],~c->r[rs],cy,1);return 1;
+    t_alu_ror:v=shift(c->r[rd],3,c->r[rs]&255,0,&cy);carry(c,cy);goto t_alu_result;
+    t_alu_tst:nz(c,c->r[rd]&c->r[rs]);return 1;
+    t_alu_neg:c->r[rd]=add_flags(c,0,~c->r[rs],1,1);return 1;
+    t_alu_cmp:(void)add_flags(c,c->r[rd],~c->r[rs],1,1);return 1;
+    t_alu_cmn:(void)add_flags(c,c->r[rd],c->r[rs],0,1);return 1;
+    t_alu_orr:v=c->r[rd]|c->r[rs];goto t_alu_result;
+    t_alu_mul:*clocks=1+multiply_cycles(c->r[rs],1);v=c->r[rd]*c->r[rs];goto t_alu_result;
+    t_alu_bic:v=c->r[rd]&~c->r[rs];goto t_alu_result;
+    t_alu_mvn:v=~c->r[rs];
+    t_alu_result:c->r[rd]=v;nz(c,v);return 1;
+    t_high_add:v=reg(c,rd)+reg(c,rs);if(rd==15)pc_write(c,v);else c->r[rd]=v;return 1;
+    t_high_cmp:(void)add_flags(c,reg(c,rd),~reg(c,rs),1,1);return 1;
+    t_high_mov:v=reg(c,rs);if(rd==15)pc_write(c,v);else c->r[rd]=v;return 1;
+    t_high_bx:if(op&0x80u)return fail(c,"BLX is not ARMv4T");bx(c,reg(c,rs));return 1;
+    t_literal: {
+        c->r[rd] = load_word(c, ((c->last_pc + 4) & ~3u) + d->immediate); return 1;
     }
-    if ((op & 0xfc00u) == 0x4000u) {
-        code = (op >> 6) & 15; a = c->r[rd]; b = c->r[rs];
-        switch (code) {
-        case 0: v = a & b; break; case 1: v = a ^ b; break;
-        case 2: case 3: case 4: v = shift(a, code - 2, b & 255, 0, &cy); carry(c, cy); break;
-        case 5: v = add_flags(c, a, b, cy, 1); c->r[rd] = v; return 1;
-        case 6: v = add_flags(c, a, ~b, cy, 1); c->r[rd] = v; return 1;
-        case 7: v = shift(a, 3, b & 255, 0, &cy); carry(c, cy); break;
-        case 8: nz(c, a & b); return 1;
-        case 9: c->r[rd] = add_flags(c, 0, ~b, 1, 1); return 1;
-        case 10: (void)add_flags(c, a, ~b, 1, 1); return 1;
-        case 11: (void)add_flags(c, a, b, 0, 1); return 1;
-        case 12: v = a | b; break; case 13: v = a * b; break;
-        case 14: v = a & ~b; break; default: v = ~b; break;
-        }
-        c->r[rd] = v; nz(c, v); return 1;
-    }
-    if ((op & 0xfc00u) == 0x4400u) {
-        code = (op >> 8) & 3; rd |= (op >> 4) & 8; rs = (op >> 3) & 15;
-        a = reg(c, rd); b = reg(c, rs);
-        if (code == 3) { if (op & 0x80u) return fail(c, "BLX is not ARMv4T"); bx(c, b); }
-        else if (code == 1) (void)add_flags(c, a, ~b, 1, 1);
-        else { v = code ? b : a + b; if (rd == 15) pc_write(c, v); else c->r[rd] = v; }
-        return 1;
-    }
-    if ((op & 0xf800u) == 0x4800u) {
-        rd = (op >> 8) & 7; c->r[rd] = load_word(c, ((c->last_pc + 4) & ~3u) + (op & 255) * 4); return 1;
-    }
-    if ((op & 0xf000u) == 0x5000u) {
-        code = (op >> 9) & 7; address = c->r[rs] + c->r[rn];
+    t_register_memory: {
+        code = d->code; address = c->r[rs] + c->r[rn];
         switch (code) {
         case 0: bus_write(c->bus, address & ~3u, 4, c->r[rd]); break;
         case 1: bus_write(c->bus, address & ~1u, 2, c->r[rd]); break;
@@ -393,29 +424,28 @@ static int thumb(Arm7 *c, uint32_t op)
         }
         return 1;
     }
-    if ((op & 0xe000u) == 0x6000u) {
-        unsigned width = (op & 0x1000u) ? 1u : 4u;
-        address = c->r[rs] + ((op >> 6) & 31) * width;
+    t_immediate_memory: {
+        unsigned width = d->code;
+        address = c->r[rs] + d->immediate;
         if (op & 0x800u) c->r[rd] = width == 4 ? load_word(c, address) : bus_read(c->bus, address, 1);
         else bus_write(c->bus, width == 4 ? address & ~3u : address, width, c->r[rd]); return 1;
     }
-    if ((op & 0xf000u) == 0x8000u) {
-        address = c->r[rs] + ((op >> 6) & 31) * 2;
+    t_half: {
+        address = c->r[rs] + d->immediate;
         if (op & 0x800u) c->r[rd] = load_half(c, address, 0); else bus_write(c->bus, address & ~1u, 2, c->r[rd]); return 1;
     }
-    if ((op & 0xf000u) == 0x9000u) {
-        rd = (op >> 8) & 7; address = c->r[13] + (op & 255) * 4;
+    t_sp_memory: {
+        address = c->r[13] + d->immediate;
         if (op & 0x800u) c->r[rd] = load_word(c, address); else bus_write(c->bus, address & ~3u, 4, c->r[rd]); return 1;
     }
-    if ((op & 0xf000u) == 0xa000u) {
-        c->r[(op >> 8) & 7] = ((op & 0x800u) ? c->r[13] : (c->last_pc + 4) & ~3u) + (op & 255) * 4; return 1;
+    t_address: {
+        c->r[rd] = ((op & 0x800u) ? c->r[13] : (c->last_pc + 4) & ~3u) + d->immediate; return 1;
     }
-    if ((op & 0xff00u) == 0xb000u) {
-        b = (op & 127) * 4; c->r[13] = (op & 0x80u) ? c->r[13] - b : c->r[13] + b; return 1;
+    t_sp_add: {
+        b = d->immediate; c->r[13] = (op & 0x80u) ? c->r[13] - b : c->r[13] + b; return 1;
     }
-    if ((op & 0xf600u) == 0xb400u) {
-        unsigned list = op & 255, count = !!(op & 0x100u), pop = (op >> 11) & 1;
-        for (i = 0; i < 8; ++i) count += !!(list & (1u << i));
+    t_pushpop: {
+        unsigned list = op & 255, count = d->count, pop = (op >> 11) & 1;
         if (!count) return fail(c, "empty Thumb PUSH/POP");
         address = pop ? c->r[13] : c->r[13] - count * 4;
         for (i = 0; i < 8; ++i) if (list & (1u << i)) {
@@ -426,15 +456,14 @@ static int thumb(Arm7 *c, uint32_t op)
         }
         c->r[13] = pop ? c->r[13] + count * 4 : c->r[13] - count * 4; return 1;
     }
-    if ((op & 0xf000u) == 0xc000u) {
-        unsigned list = op & 255, load = (op >> 11) & 1, first = 8, count = 0;
-        rn = (op >> 8) & 7; a = c->r[rn]; address = a;
+    t_multiple: {
+        unsigned list = op & 255, load = (op >> 11) & 1, first = d->code, count = d->count;
+        a = c->r[rn]; address = a;
         if (!list) {
             if (load) pc_write(c, bus_read(c->bus, address & ~3u, 4));
             else bus_write(c->bus, address & ~3u, 4, c->last_pc + 4);
             c->r[rn] += 64; return 1;
         }
-        for (i = 0; i < 8; ++i) if (list & (1u << i)) { ++count; if (first == 8) first = i; }
         for (i = 0; i < 8; ++i) if (list & (1u << i)) {
             if (load) c->r[i] = bus_read(c->bus, address & ~3u, 4);
             else bus_write(c->bus, address & ~3u, 4, i == rn && i != first ? a + count * 4 : c->r[i]);
@@ -442,22 +471,23 @@ static int thumb(Arm7 *c, uint32_t op)
         }
         if (!load || !(list & (1u << rn))) c->r[rn] = address; return 1;
     }
-    if ((op & 0xf000u) == 0xd000u) {
-        code = (op >> 8) & 15;
+    t_conditional: {
+        int taken;code = d->code;
+        taken=code==15||((d->opcode>>(c->cpsr>>28))&1);*clocks=taken?3u:1u;
         if (code == 15) { exception(c, 0x13, 8, c->last_pc + 2, 0); return 1; }
         if (code == 14) return fail(c, "undefined Thumb instruction");
-        if (cond(c, code)) pc_write(c, c->last_pc + 4 + (uint32_t)((int32_t)(int8_t)op * 2)); return 1;
+        if (taken) pc_write(c, c->last_pc + 4 + d->immediate); return 1;
     }
-    if ((op & 0xf800u) == 0xe000u) {
-        b = (op & 0x7ffu) << 1; if (b & 0x800u) b |= 0xfffff000u; pc_write(c, c->last_pc + 4 + b); return 1;
+    t_branch: {
+        b = d->immediate; pc_write(c, c->last_pc + 4 + b); return 1;
     }
-    if ((op & 0xf800u) == 0xf000u) {
-        b = (op & 0x7ffu) << 12; if (b & 0x400000u) b |= 0xff800000u; c->r[14] = c->last_pc + 4 + b; return 1;
+    t_bl_prefix: {
+        b = d->immediate; c->r[14] = c->last_pc + 4 + b; return 1;
     }
-    if ((op & 0xf800u) == 0xf800u) {
-        address = c->r[14] + (op & 0x7ffu) * 2; c->r[14] = (c->last_pc + 2) | 1u; pc_write(c, address); return 1;
+    t_bl_suffix: {
+        address = c->r[14] + d->immediate; c->r[14] = (c->last_pc + 2) | 1u; pc_write(c, address); return 1;
     }
-    return fail(c, "unimplemented/reserved Thumb instruction");
+    t_reserved:return fail(c, "unimplemented/reserved Thumb instruction");
 }
 static unsigned register_count(uint32_t mask)
 {
@@ -470,56 +500,36 @@ static unsigned multiply_cycles(uint32_t value,int signed_value)
         if(!upper||(signed_value&&upper==(UINT32_MAX>>(n*8))))return n;}
     return 4;
 }
-static unsigned instruction_cycles(const Arm7 *c,uint32_t op)
-{
-    /* ARM DDI 0210 instruction speed summary, S=N=I=one core cycle.
-       Memory wait states and bus-width penalties belong to the bus/model. */
-    unsigned n,load,rd;
-    if(!(c->cpsr&ARM_T)) {
-        if(!cond(c,op>>28))return 1;
-        if(plain_data_processing(op)) {
-            /* Same result as the final data-processing branch below. */
-            n=(!(op&(1u<<25))&&!!(op&16))?2:1;rd=(op>>12)&15;
-            return n+((rd==15&&((op>>21)&15)!=8&&((op>>21)&15)!=9&&((op>>21)&15)!=10&&((op>>21)&15)!=11)?2:0);
-        }
-        if((op&0x0c000000u)==0x04000000u){load=(op>>20)&1;rd=(op>>12)&15;return load?3+(rd==15?2:0):2;} /* single LDR/STR */
-        if((op&0x0e000000u)==0x0a000000u)return 3; /* B/BL */
-        if((op&0x0fbf0fffu)==0x010f0000u||(op&0x0fb0fff0u)==0x0120f000u||(op&0x0fb0f000u)==0x0320f000u)return 1;
-        if((op&0x0ffffff0u)==0x012fff10u||(op&0x0e000000u)==0x0a000000u||(op&0x0f000000u)==0x0f000000u)return 3;
-        if((op&0x0f8000f0u)==0x00800090u)return 2+multiply_cycles(c->r[(op>>8)&15],!!(op&(1u<<22)))+!!(op&(1u<<21));
-        if((op&0x0fc000f0u)==0x00000090u)return 1+multiply_cycles(c->r[(op>>8)&15],1)+!!(op&(1u<<21));
-        if((op&0x0fb00ff0u)==0x01000090u)return 4;
-        load=(op>>20)&1;rd=(op>>12)&15;
-        if((op&0x0e000000u)==0x08000000u){n=register_count(op&65535);if(!n)n=16;return n+1+load+(load&&!!(op&0x8000)?2:0);}
-        if((op&0x0c000000u)==0x04000000u||((op&0x0e000090u)==0x00000090u&&(op&0x60u)))return load?3+(rd==15?2:0):2;
-        if((op&0x0c000000u)==0){n=(!(op&(1u<<25))&&!!(op&16))?2:1;
-            return n+((rd==15&&((op>>21)&15)!=8&&((op>>21)&15)!=9&&((op>>21)&15)!=10&&((op>>21)&15)!=11)?2:0);}
-        return 1;
-    }
-    if(op<0x4000)return 1; /* shifts, add/sub, immediate ALU: one cycle, none of the tests below can match */
-    if((op&0xfc00)==0x4000){n=(op>>6)&15;if(n==13)return 1+multiply_cycles(c->r[(op>>3)&7],1);return ((n>=2&&n<=4)||n==7)?2:1;}
-    if((op&0xfc00)==0x4400){n=(op>>8)&3;rd=(op&7)|((op>>4)&8);return n==3||((n==0||n==2)&&rd==15)?3:1;}
-    if((op&0xf800)==0x4800)return 3;
-    if((op&0xf000)==0x5000){n=(op>>9)&7;return n>=3?3:2;}
-    if((op&0xe000)==0x6000||(op&0xf000)==0x8000||(op&0xf000)==0x9000)return op&0x0800?3:2;
-    if((op&0xf600)==0xb400){load=!!(op&0x0800);n=register_count(op&255)+!!(op&256);return n+1+load+(load&&!!(op&256)?2:0);}
-    if((op&0xf000)==0xc000){n=register_count(op&255);if(!n)n=16;load=!!(op&0x0800);return n+1+load+(load&&!(op&255)?2:0);}
-    if((op&0xf000)==0xd000){n=(op>>8)&15;return n==15||cond(c,n)?3:1;}
-    if((op&0xf800)==0xe000||(op&0xf800)==0xf800)return 3;
-    return 1;
-}
 int arm7_step(Arm7 *c)
 {
-    int ok;
-    unsigned clocks;
+    int ok;Decoded scratch;const Decoded *d;
+    unsigned clocks=1;
     if (c->halted) return 0;
     c->last_pc = c->r[15]; c->bus->pc = c->last_pc; c->bus->ticks = c->cycles;
     if (c->fiq && !(c->cpsr & 0x40u)) { exception(c, 0x11, 0x1c, c->last_pc + 4, 1); ++c->cycles;c->clock_cycles+=3; return 1; }
     if (c->irq && !(c->cpsr & 0x80u)) { exception(c, 0x12, 0x18, c->last_pc + 4, 0); ++c->cycles;c->clock_cycles+=3; return 1; }
-    c->last_opcode = bus_read(c->bus, c->last_pc, (c->cpsr & ARM_T) ? 2 : 4);
+    c->last_opcode = c->cache?bus_fetch(c->bus,c->last_pc,(c->cpsr&ARM_T)?2:4,&c->cache->fetch):
+        bus_read(c->bus, c->last_pc, (c->cpsr & ARM_T) ? 2 : 4);
     if (c->bus->fault) return fail(c, "instruction fetch/bus fault pending");
-    clocks=instruction_cycles(c,c->last_opcode);
-    c->r[15] += (c->cpsr & ARM_T) ? 2u : 4u;
-    ok = (c->cpsr & ARM_T) ? thumb(c, c->last_opcode) : arm(c, c->last_opcode);
+    if(c->cpsr&ARM_T){
+        if(c->cache&&c->last_opcode<=65535){d=&c->cache->thumb[c->last_opcode];if(!d->kind)decode_thumb((Decoded *)d,c->last_opcode);}
+        else {decode_thumb(&scratch,c->last_opcode);d=&scratch;}
+        c->r[15]+=2;ok=thumb(c,c->last_opcode,&clocks,d);
+    }
+    else {
+        unsigned condition=c->last_opcode>>28;
+        /* Evaluate the ARM condition once, not independently for timing and
+           execution. NV remains a reserved-instruction fault, not a skip. */
+        if(condition==15){c->r[15]+=4;ok=fail(c,"ARMv4T NV/reserved instruction");}
+        else if(condition==14||cond(c,condition)){
+            if(c->cache){d=&c->cache->arm[(c->last_opcode*2654435761u)>>22];
+                if(!d->kind||d->opcode!=c->last_opcode)decode_arm((Decoded *)d,c->last_opcode);}
+            else {decode_arm(&scratch,c->last_opcode);d=&scratch;}
+            clocks=d->clocks;
+            if(d->kind==A_LONG_MUL)clocks+=multiply_cycles(c->r[d->rs],!!(c->last_opcode&(1u<<22)));
+            else if(d->kind==A_MUL)clocks+=multiply_cycles(c->r[d->rs],1);
+            c->r[15]+=4;ok=arm(c,c->last_opcode,d);
+        }else {c->r[15]+=4;ok=1;}
+    }
     ++c->instructions; ++c->cycles;c->clock_cycles+=clocks; return ok;
 }

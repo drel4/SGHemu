@@ -908,3 +908,15 @@ routing change. A 26.6-second idle-host mixed playback had zero output underruns
 a run competing with a full build recorded one. Traffic tracing remains an
 optional performance cost. Listener confirmation of the remaining audible clicks
 is still needed; these measurements do not prove every MMF is gap-free.
+
+## Optional C100 detuning
+
+The L&F detune preference uses the midpoint of the user's reported 10–15-cent
+hardware offset, not an independently measured hardware value. A streaming Q32
+linear resampler lowers Yamaha pitch by 12.5 cents (rate 0.99280572); the clock-style
+approximation also makes playback about 0.72% longer. CPU tones are mixed after
+resampling so their pitch is unchanged. Default-off output is bit-identical.
+
+Tests cover bypass, capacity limits, history across 96-frame synthesis boundaries,
+mode changes, and a 440-Hz sine measured at 436.83451 Hz (-12.5000 cents): 507
+checks. Output staging carries partial blocks across calls without dropping samples.

@@ -1,5 +1,6 @@
 #include "ma5_hw.h"
 #include "adpcm.h"
+#include "ma_detune.h"
 #include "file.h"
 #include <windows.h>
 #include <mmsystem.h>
@@ -30,11 +31,12 @@ struct Ma5Hw {
     FILE *wav; char path[1024], wav_path[1024], error[256];
     int speakers, initialized, op, paused, timer_period; unsigned arg, result;
     volatile LONG irq, callbacks,led_token;
-    Ma5HwStats stats;
+    Ma5HwStats stats;int profiling;Ma5HwProfile profile;
     unsigned adpcm_dirty[32],adpcm_lookahead[32];
     uint32_t adpcm_next_step[32];int32_t adpcm_next_predictor[32];
     Ma5PcmMixer mixer;void *mixer_context;
     const uint8_t *packet;unsigned packet_size;
+    MaDetune detune;
 };
 static volatile LONG occupied;
 static int native_u32(uintptr_t address,uint32_t *value)
@@ -173,25 +175,10 @@ static int wav_header(Ma5Hw *h)
     memcpy(header+36,"data",4);put_le32(header+40,bytes);
     return !fseek(h->wav,0,SEEK_SET)&&fwrite(header,1,44,h->wav)==44;
 }
-static int generate(Ma5Hw *h,unsigned frames)
+static int output_stage(Ma5Hw *h)
 {
-    int16_t left[482]={0},right[482]={0};unsigned i,slot;WAVEHDR *header;
-    if(!frames||frames>480||h->fill+frames>480||(h->wav&&h->stats.frames>(UINT32_MAX-36u)/4u-frames))return 0;
-    left[0]=left[frames+1]=12345;right[0]=right[frames+1]=12345;
-    if(!synthesize(h,left+1,right+1,frames))return 0;
-    if(left[0]!=12345||left[frames+1]!=12345||right[0]!=12345||right[frames+1]!=12345)return 0;
-    if(h->mixer)h->mixer(h->mixer_context,left+1,right+1,frames);
-    /* The DLL runs in short steps so its sequencer, IRQs and PCM cursor stay
-       close to emulated time; the sound card still receives 10 ms buffers. */
-    for(i=0;i<frames;++i) {
-        int l=left[i+1],r=right[i+1];unsigned a=(unsigned)(l<0?-l:l),b=(unsigned)(r<0?-r:r);
-        h->stage[(h->fill+i)*2]=(int16_t)l;h->stage[(h->fill+i)*2+1]=(int16_t)r;
-        if(l)++h->stats.nonzero;if(r)++h->stats.nonzero;
-        if(a>h->stats.peak)h->stats.peak=a;if(b>h->stats.peak)h->stats.peak=b;
-    }
-    h->fill+=frames;
-    if(h->fill<480)return 1;
-    frames=h->fill;h->fill=0;slot=h->next;header=&h->headers[slot];
+    unsigned i,slot=h->next,frames=480;WAVEHDR *header=&h->headers[slot];
+    if(h->wav&&h->stats.frames>(UINT32_MAX-36u)/4u-frames)return 0;
     if(h->wave && (header->dwFlags&WHDR_PREPARED)) {
         unsigned finished=0;
         /* A fully drained, previously filled ring means the host ran out of
@@ -212,6 +199,24 @@ static int generate(Ma5Hw *h,unsigned frames)
         h->next=(slot+1)%OUTPUT_SLOTS;
     }
     return 1;
+}
+static int generate(Ma5Hw *h,unsigned frames)
+{
+    int16_t left[482]={0},right[482]={0},out_left[512],out_right[512];unsigned i,count;
+    if(!frames||frames>480)return 0;
+    left[0]=left[frames+1]=12345;right[0]=right[frames+1]=12345;
+    if(!synthesize(h,left+1,right+1,frames))return 0;
+    if(left[0]!=12345||left[frames+1]!=12345||right[0]!=12345||right[frames+1]!=12345)return 0;
+    count=ma_detune_pcm(&h->detune,left+1,right+1,frames,out_left,out_right,512);if(!count)return 0;
+    if(h->mixer)h->mixer(h->mixer_context,out_left,out_right,count);
+    /* Detuned blocks can straddle a 480-frame output slot. Never discard a
+       partial block or reset interpolation history at short DLL boundaries. */
+    for(i=0;i<count;++i){int l=out_left[i],r=out_right[i];unsigned a=(unsigned)(l<0?-l:l),b=(unsigned)(r<0?-r:r);
+        h->stage[h->fill*2]=(int16_t)l;h->stage[h->fill*2+1]=(int16_t)r;++h->fill;
+        if(l)++h->stats.nonzero;if(r)++h->stats.nonzero;
+        if(a>h->stats.peak)h->stats.peak=a;if(b>h->stats.peak)h->stats.peak=b;
+        if(h->fill==480){if(!output_stage(h))return 0;h->fill=0;}
+    }return 1;
 }
 #define LOAD(member,name) do { FARPROC proc=GetProcAddress(h->dll,name);if(!proc)goto failed; \
     _Static_assert(sizeof(h->member)==sizeof(proc),"x86 function pointer");memcpy(&h->member,&proc,sizeof(proc)); } while(0)
@@ -249,6 +254,7 @@ static unsigned __stdcall worker(void *arg)
         case 4:if(!generate(h,h->arg)){h->stats.failed=1;h->result=0;}break;
         case 5:goto cleanup;
         case 6:h->term();h->initialized=0;h->irq=0;h->fill=0;memset(h->adpcm_dirty,0,sizeof(h->adpcm_dirty));memset(h->adpcm_lookahead,0,sizeof(h->adpcm_lookahead));
+            h->detune.primed=0;h->detune.phase=0;
             if(h->init(48000,0,irq_callback)!=0x46){h->stats.failed=1;h->result=0;}else h->initialized=1;break;
         case 7:if(h->wave){if(h->arg)waveOutPause(h->wave);else waveOutRestart(h->wave);}h->paused=(int)h->arg;break;
         case 8:
@@ -290,6 +296,7 @@ static unsigned __stdcall worker(void *arg)
         case 16:h->write_status((unsigned char)h->arg);
             for(i=0;i<h->packet_size;++i)h->write_data(h->packet[i]);break;
         case 17:h->generate(NULL,NULL,0);break;
+        case 18:ma_detune_set(&h->detune,h->arg!=0);break;
         case 13: {
             unsigned address=h->arg&0xfffff,bytes=(h->arg&0x100000)?3:address>=128?2:1;
             h->write_status(3);
@@ -321,10 +328,16 @@ cleanup:
 }
 static unsigned command(Ma5Hw *h,int op,unsigned arg)
 {
+    LARGE_INTEGER before={0},after={0};int profiling;
     if(!h||h->stats.failed)return 0;
+    profiling=h->profiling;if(profiling)QueryPerformanceCounter(&before);
     h->op=op;h->arg=arg;SetEvent(h->request);
     /* The only sender is the emulator thread; no DLL calls on this thread. */
-    WaitForSingleObject(h->done,INFINITE);return h->result;
+    WaitForSingleObject(h->done,INFINITE);
+    if(profiling){QueryPerformanceCounter(&after);++h->profile.commands;
+        if(op==4)h->profile.generate_ticks+=(uint64_t)(after.QuadPart-before.QuadPart);
+        else h->profile.other_ticks+=(uint64_t)(after.QuadPart-before.QuadPart);}
+    return h->result;
 }
 Ma5Hw *ma5_hw_open(const char *dll,const char *wav,int speakers,char *error,unsigned error_size)
 {
@@ -357,6 +370,7 @@ int ma5_hw_generate(Ma5Hw *h,unsigned frames){return (int)command(h,4,frames);}
 void ma5_hw_set_mixer(Ma5Hw *h,Ma5PcmMixer mixer,void *context)
 {if(h){h->mixer=mixer;h->mixer_context=context;}}
 void ma5_hw_pump(Ma5Hw *h){(void)command(h,17,0);}
+void ma5_hw_set_detune(Ma5Hw *h,int enabled){(void)command(h,18,(unsigned)(enabled!=0));}
 void ma5_hw_pause(Ma5Hw *h,int paused){(void)command(h,7,(unsigned)(paused!=0));}
 void ma5_hw_reset(Ma5Hw *h){(void)command(h,6,0);}
 void ma5_hw_parameter(Ma5Hw *h,unsigned address,unsigned value){(void)command(h,9,(address<<8)|(value&255));}
@@ -377,3 +391,7 @@ void ma5_hw_close(Ma5Hw *h)
     h->op=5;SetEvent(h->request);WaitForSingleObject(h->thread,INFINITE);
     CloseHandle(h->thread);CloseHandle(h->request);CloseHandle(h->done);CloseHandle(h->ready);free(h);
 }
+
+/* Caller holds the emulator mutex, as for synchronous commands. */
+void ma5_hw_profile_enable(Ma5Hw *h,int enabled){if(h){h->profiling=!!enabled;memset(&h->profile,0,sizeof(h->profile));}}
+Ma5HwProfile ma5_hw_profile(Ma5Hw *h){Ma5HwProfile p={0};return h?h->profile:p;}

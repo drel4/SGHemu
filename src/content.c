@@ -176,14 +176,17 @@ int content_java_menu(ContentImport *im,Machine *m)
 static int java_run(ContentImport *im,Machine *m)
 {
     Arm7 *c=&m->cpu;static const char url[]="http://sghemu.invalid/package.jad";
+    /* An RTOS task may visit the idle entry while an injected call is still
+       suspended. Only our private return address proves that call returned. */
+    const uint32_t returned=0xffff0000u;
     uint32_t g=m->java_globals;
     if(!im->stage&&c->instructions<m->java_min_instructions)return 1;
-    if(c->r[15]!=im->trigger)return 1;
+    if(c->r[15]!=(im->stage?returned:im->trigger))return 1;
     if(!(c->cpsr&ARM_T))return fail(im,"Java entry was not reached in Thumb mode");
     switch(im->stage){
     case 0:
         im->caller=*c;
-        if(!im->file){c->r[0]=m->java_message;c->r[1]=0;c->r[14]=im->trigger|1u;
+        if(!im->file){c->r[0]=m->java_message;c->r[1]=0;c->r[14]=returned|1u;
             c->r[15]=m->java_send_ui;im->stage=5;return 1;}
         c->r[0]=im->size;im->stage=1;break;
     case 1:
@@ -200,14 +203,14 @@ static int java_run(ContentImport *im,Machine *m)
         /* DeleteInitJad frees both pointers. They MUST be independent heap blocks. */
         bus_write(&m->bus,g-4,4,im->url_ptr);bus_write(&m->bus,g,4,sizeof(url)-1);
         bus_write(&m->bus,g+4,4,im->jad_ptr);bus_write(&m->bus,g+8,4,(uint32_t)strlen(im->jad));
-        c->r[0]=im->data;c->r[1]=im->size;c->r[14]=im->trigger|1u;c->r[15]=m->java_set_jar;
+        c->r[0]=im->data;c->r[1]=im->size;c->r[14]=returned|1u;c->r[15]=m->java_set_jar;
         im->stage=4;return 1;
     case 4:
-        c->r[0]=m->java_message;c->r[1]=0;c->r[14]=im->trigger|1u;c->r[15]=m->java_send_ui;
+        c->r[0]=m->java_message;c->r[1]=0;c->r[14]=returned|1u;c->r[15]=m->java_send_ui;
         im->stage=5;return 1;
     default:restore_caller(im,m);im->done=1;return 2;
     }
-    c->r[14]=im->trigger|1u;c->r[15]=im->alloc;return 1;
+    c->r[14]=returned|1u;c->r[15]=im->alloc;return 1;
 }
 static int run(ContentImport *im, Machine *m)
 {
@@ -275,5 +278,6 @@ int content_import_step(ContentImport *im, Machine *m)
     /* A rejected or aborted import leaves the guest mid-call; put its own state
        back so a normal boot can still finish and persist what it has. */
     if (!result && im->stage) restore_caller(im, m);
+    m->guest_busy=im->stage&&!im->done&&!im->failed;
     return result;
 }

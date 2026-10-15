@@ -5,17 +5,20 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <process.h>
 #include <math.h>
+#include <wchar.h>
 #include "machine.h"
 #include "firmware.h"
 #include "nvram.h"
 #include "userfs.h"
 #include "content.h"
 #include "host.h"
+#include "key_text.h"
 #define ID_OPEN_MODEL 100
 #define ID_OPEN_ROM 101
 #define ID_RESET 102
@@ -30,6 +33,10 @@
 #define ID_FS_BACKUP 302
 #define ID_FS_IMPORT 303
 #define ID_FS_JAVA 304
+#define ID_FS_ADD 305
+#define ID_FS_REMOVE 306
+#define ID_FS_STOP 307
+#define ID_FS_SYSTEM 308
 #define ID_RUN 110
 #define ID_PAUSE 111
 #define ID_STEP 112
@@ -39,9 +46,19 @@
 #define ID_AUDIO_IMPORT 116
 #define ID_HIGH_PRIORITY 117
 #define ID_HOST_TIME 118
+#define ID_JAVA_EXTENDED 119
+#define ID_TEXT_INPUT 167
+#define ID_CELL_ENABLED 160
+#define ID_CELL_SMS 161
+#define ID_CELL_CALL 162
+#define ID_CELL_NETWORK 163
+#define ID_GSM_OFF 164
+#define ID_GSM_INTERNET 165
+#define ID_GSM_GATEWAY 166
 #define ID_BATTERY_PERCENT 140
 #define ID_BATTERY_CABLE 141
 #define ID_LCD_GHOSTING 150
+#define ID_MA_DETUNE 151
 #define ID_PATTERN 120
 #define ID_ZOOM1 121
 #define ID_ZOOM2 122
@@ -50,12 +67,21 @@
 #define ID_ABOUT 130
 #define ID_KEY_BASE 200
 #define WM_PHONE_KEY (WM_APP + 1)
+#define IMPORT_QUEUE_MAX 256
+ typedef struct {
+    char path[1024],name[CONTENT_NAME_MAX],error[180];
+    uint32_t size,registry_id;unsigned type;int status;
+    uint64_t started,accepted;
+ } ImportItem;
 typedef struct {
     Machine m;
     NvramStore storage;
+    char sim_storage[1100];
     DWORD nv_checkpoint;
     HWND window, buttons[SGH_MAX_KEYS], diagnostics, diagnostic_edit;
-    HWND fs_window,fs_list,fs_status;
+    HWND fs_window,fs_list,fs_status,fs_queue,fs_left_label,fs_right_label;
+    ImportItem imports[IMPORT_QUEUE_MAX];unsigned import_count,import_current;
+    int import_running,fs_system;
     UserDirectory fs_directory;
     ContentImport content; /* Armed by Import...; driven on the emulation thread. */
     HFONT font;
@@ -64,6 +90,9 @@ typedef struct {
     RECT lcd;
     unsigned zoom;
     uint32_t mouse_keys, keyboard_keys, *test_pixels;
+    uint32_t text_held;
+    KeyText text_keys;
+    int text_input;
     int vk_keys[256], running, continuation, pattern, menu_active, sim_override;
     const char *state;
     unsigned last_key;
@@ -72,14 +101,18 @@ typedef struct {
     int audio_enabled, audio_paused, logging;
     unsigned audio_block;
     char emulator_settings[1024];
-    int high_priority,host_time;
+    int high_priority,host_time,java_extended;
     DWORD time_checkpoint;
     int recent_firmware;
     unsigned battery_percent;
     int charging;
-    HWND battery_window;
+    HWND battery_window,cell_editor,call_window,call_label;
+    int cell_editor_kind,cell_enabled;unsigned gsm_mode,cell_revision;char cell_network[31];
     int ghosting;
-    uint32_t *ghost_pixels;
+    int ma_detune;
+    uint32_t *ghost_pixels,*ghost_target,*display_pixels;unsigned display_width,display_height;
+    uint64_t ghost_writes,ghost_commands,ghost_changed_at;
+    int ghost_pending;
     DWORD ghost_tick;
     HICON led_icons[8];
     unsigned icon_led;
@@ -102,10 +135,18 @@ static App app;
 #define EMU_IMPORT_FAILED 4u
 static HANDLE emu_mutex, emu_thread;
 static volatile LONG emu_quit;
-static void emu_lock(void) { WaitForSingleObject(emu_mutex, INFINITE); }
+#include "gui_profile.inc"
+static void emu_lock(void)
+{
+    LARGE_INTEGER before={0},after={0};int track=profile_enabled!=0;
+    if(track)QueryPerformanceCounter(&before);WaitForSingleObject(emu_mutex,INFINITE);
+    if(track&&gui_profile.file){uint64_t ticks;QueryPerformanceCounter(&after);ticks=(uint64_t)(after.QuadPart-before.QuadPart);
+        gui_profile.gui_wait+=ticks;if(ticks>gui_profile.max_gui_wait)gui_profile.max_gui_wait=ticks;}
+}
 static void emu_unlock(void) { ReleaseMutex(emu_mutex); }
 static void update_ui(void);
 static int load_model(void);
+static int save_storage(void);
 #define filesystem_proc filesystem_proc_unlocked
 #include "gui_fs.inc"
 #undef filesystem_proc
@@ -122,6 +163,7 @@ static LRESULT CALLBACK filesystem_proc(HWND window, UINT message, WPARAM wparam
     emu_lock(); result = filesystem_proc_unlocked(window, message, wparam, lparam); emu_unlock();
     return result;
 }
+#include "gui_cellular.inc"
 static void update_led_icon(void)
 {
     unsigned state=app.m.phone_io.led&7u;
@@ -149,13 +191,27 @@ static void ghost_frame(void)
 {
     DWORD now=GetTickCount(),elapsed=now-app.ghost_tick;size_t i,n=(size_t)app.m.width*app.m.height;
     unsigned retain=(unsigned)(exp(-(double)elapsed/75.0)*256.0);
-    const uint32_t *target=app.pattern?app.test_pixels:app.m.pixels;
+    const uint32_t *target=app.pattern?app.test_pixels:app.ghost_target;
     app.ghost_tick=now;if(!target||!app.ghost_pixels)return;
     for(i=0;i<n;++i){unsigned shift;uint32_t result=0;
         for(shift=0;shift<24;shift+=8){unsigned a=(app.ghost_pixels[i]>>shift)&255,b=(target[i]>>shift)&255;
             unsigned v=(a*retain+b*(256-retain)+128)>>8;
             if(a>b?a-b<=2:b-a<=2)v=b;result|=v<<shift;}
         app.ghost_pixels[i]=result;}
+}
+/* Publish a settled guest redraw, not its temporary clear/partially drawn
+   pixels. Called on the emulation thread with emu_mutex held. */
+static void ghost_capture(void)
+{
+    uint64_t now=app.m.clock.nanoseconds;
+    if(!app.ghosting||app.pattern||!app.ghost_target||!app.m.pixels)return;
+    if(!app.m.clock.attached){memcpy(app.ghost_target,app.m.pixels,(size_t)app.m.width*app.m.height*4);return;}
+    if(app.ghost_writes!=app.m.lcd.writes||app.ghost_commands!=app.m.lcd.commands){
+        app.ghost_writes=app.m.lcd.writes;app.ghost_commands=app.m.lcd.commands;
+        app.ghost_changed_at=now;app.ghost_pending=1;
+    }else if(app.ghost_pending&&now-app.ghost_changed_at>=3000000){
+        memcpy(app.ghost_target,app.m.pixels,(size_t)app.m.width*app.m.height*sizeof(uint32_t));app.ghost_pending=0;
+    }
 }
 static const char *key_names[SGH_MAX_KEYS] = {
     "Soft left", "Up", "Soft right", "Left", "OK", "Right", "Call", "Down", "End",
@@ -217,6 +273,13 @@ static void update_diagnostics(void)
         app.m.sim.attached ? (app.m.sim.present ? "synthetic card inserted" : "removed") : "not mapped",
         (unsigned long long)app.m.sim.resets,(unsigned long long)app.m.sim.card.commands,
         (unsigned long long)app.m.sim.received,(unsigned long long)app.m.sim.transmitted,(unsigned long long)app.m.sim.dma_bytes);
+    if(app.m.cellular.ready&&length<sizeof(text))length+=(size_t)snprintf(text+length,sizeof(text)-length,
+        "Cellular: %s; network %s; call state %u; SMS received %llu / sent %llu; last recipient %s\r\n"
+        "Packet data: mode %u; UDP TX %llu / RX %llu; %s\r\n",
+        app.m.cellular.enabled?"enabled":"off",app.m.cellular.network,app.m.cellular.call_state,
+        (unsigned long long)app.m.cellular.received_sms,(unsigned long long)app.m.cellular.sent_sms,app.m.cellular.last_sms_number,
+        app.m.network.mode,(unsigned long long)app.m.network.transmitted,(unsigned long long)app.m.network.received,
+        *app.m.network.error?app.m.network.error:"no transport error");
     if (length < sizeof(text)) snprintf(text + length, sizeof(text) - length,
         "\r\nSee build/gui-unmapped.log for every unknown access.\r\n"
         "LCD output comes only from guest command/data writes. Keypad scanning/debounce runs in firmware.\r\n"
@@ -232,14 +295,25 @@ static void update_ui(void)
     CheckMenuItem(menu, ID_PATTERN, MF_BYCOMMAND | (app.pattern ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, ID_SIM, MF_BYCOMMAND | (app.m.sim.present ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu,ID_LCD_GHOSTING,MF_BYCOMMAND|(app.ghosting?MF_CHECKED:MF_UNCHECKED));
+    CheckMenuItem(menu,ID_MA_DETUNE,MF_BYCOMMAND|(app.ma_detune?MF_CHECKED:MF_UNCHECKED));
     phone_io_pause(&app.m.phone_io,!app.running);
     CheckMenuItem(menu, ID_AUDIO, MF_BYCOMMAND | (app.audio_enabled ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu, ID_HIGH_PRIORITY, MF_BYCOMMAND | (app.high_priority ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu, ID_TEXT_INPUT, MF_BYCOMMAND | (app.text_input ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu,ID_LOGGING,MF_BYCOMMAND|(app.logging?MF_CHECKED:MF_UNCHECKED));
     CheckMenuItem(menu, ID_HOST_TIME, MF_BYCOMMAND | (app.host_time ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu,ID_CELL_ENABLED,MF_BYCOMMAND|(app.cell_enabled?MF_CHECKED:MF_UNCHECKED));
+    CheckMenuRadioItem(menu,ID_GSM_OFF,ID_GSM_GATEWAY,ID_GSM_OFF+app.gsm_mode,MF_BYCOMMAND);
+    EnableMenuItem(menu,ID_CELL_ENABLED,MF_BYCOMMAND|(app.m.cellular.ready?MF_ENABLED:MF_GRAYED));
+    EnableMenuItem(menu,ID_CELL_NETWORK,MF_BYCOMMAND|(app.m.cellular.ready?MF_ENABLED:MF_GRAYED));
+    {unsigned id;int available=app.m.cellular.enabled&&app.m.cellular.name_ptr&&app.m.sim.present;
+     for(id=ID_CELL_SMS;id<=ID_CELL_CALL;++id)EnableMenuItem(menu,id,MF_BYCOMMAND|(available?MF_ENABLED:MF_GRAYED));}
+    {unsigned id;for(id=ID_GSM_OFF;id<=ID_GSM_GATEWAY;++id)EnableMenuItem(menu,id,MF_BYCOMMAND|(app.m.network.txn_start?MF_ENABLED:MF_GRAYED));}
+    CheckMenuItem(menu, ID_JAVA_EXTENDED, MF_BYCOMMAND | (app.java_extended ? MF_CHECKED : MF_UNCHECKED));
+    EnableMenuItem(menu, ID_JAVA_EXTENDED, MF_BYCOMMAND | (app.m.java_buffer_get ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(menu, ID_HOST_TIME, MF_BYCOMMAND | (app.m.rtc.attached ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(menu, ID_BATTERY_PERCENT, MF_BYCOMMAND | (app.m.battery.enabled ? MF_ENABLED : MF_GRAYED));
-    EnableMenuItem(menu, ID_BATTERY_CABLE, MF_BYCOMMAND | (app.m.battery.enabled ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu, ID_BATTERY_CABLE, MF_BYCOMMAND | ((app.m.battery.enabled || app.m.battery.charger_port) ? MF_ENABLED : MF_GRAYED));
     CheckMenuItem(menu, ID_BATTERY_CABLE, MF_BYCOMMAND | (app.charging ? MF_CHECKED : MF_UNCHECKED));
     if (app.m.ma3.hw && app.audio_paused != !app.running) {
         ma5_hw_pause(app.m.ma3.hw, !app.running); app.audio_paused = !app.running;
@@ -256,6 +330,7 @@ static void update_ui(void)
 static void release_keys(void)
 {
     unsigned i;
+    key_text_reset(&app.text_keys);app.text_held=0;
     app.mouse_keys = app.keyboard_keys = 0; app.m.keys = 0;
     for (i = 0; i < SGH_MAX_KEYS; ++i) machine_key(&app.m, i, 0);
     for (i = 0; i < 256; ++i) app.vk_keys[i] = -1;
@@ -267,7 +342,7 @@ static void phone_key(unsigned key, int down, int mouse)
     if (!app.m.loaded || key >= SGH_MAX_KEYS) return;
     bit = 1u << key; source = mouse ? &app.mouse_keys : &app.keyboard_keys;
     if (down) { *source |= bit; app.last_key = key; } else *source &= ~bit;
-    machine_key(&app.m, key, !!((app.mouse_keys | app.keyboard_keys) & bit));
+    machine_key(&app.m, key, !!((app.mouse_keys | app.keyboard_keys | app.text_held) & bit));
     if (!mouse) SendMessageA(app.buttons[key], BM_SETSTATE, !!((app.mouse_keys | app.keyboard_keys) & bit), 0);
     update_ui();
 }
@@ -296,6 +371,13 @@ static int keyboard_key(WPARAM vk)
     case VK_F3: return 6; case VK_F4: return 8; case VK_BACK: return 21;
     default: return -1;
     }
+}
+static void text_step(void)
+{
+    unsigned key;int down;uint32_t bit;
+    if(!key_text_tick(&app.text_keys,app.m.clock.nanoseconds,&key,&down))return;
+    bit=1u<<key;if(down){app.text_held|=bit;app.last_key=key;}else app.text_held&=~bit;
+    machine_key(&app.m,key,!!((app.mouse_keys|app.keyboard_keys|app.text_held)&bit));
 }
 static void layout(void)
 {
@@ -332,7 +414,10 @@ static void fit_window(void)
 }
 static int save_storage(void)
 {
-    if (nvram_store_flush(&app.storage, &app.m)) return 1;
+    if (nvram_store_flush(&app.storage, &app.m)) {
+        if(!app.m.sim.attached||!*app.sim_storage||sim_card_save_storage(&app.m.sim.card,app.sim_storage))return 1;
+        snprintf(app.m.error,sizeof(app.m.error),"%s",app.m.sim.card.error);
+    }
     app.running = 0; app.state = "Paused - NVM save failed";
     MessageBoxA(app.window, app.m.error, "SGHemu - automatic NVM save failed", MB_OK | MB_ICONERROR);
     update_ui(); return 0;
@@ -341,25 +426,28 @@ static int save_storage(void)
    while their FILE pointers are replaced. Enabling is all-or-nothing. */
 static int apply_logging(int enabled)
 {
-    FILE *unmapped=NULL,*traffic=NULL;
+    FILE *unmapped=NULL,*traffic=NULL,*profile=NULL;
     if(enabled){
         unmapped=fopen("build/gui-unmapped.log","a");
         if(unmapped)traffic=fopen("build/gui-ma3-traffic.log","a");
-        if(!unmapped||!traffic){if(unmapped)fclose(unmapped);if(traffic)fclose(traffic);return 0;}
+        if(traffic)profile=fopen("build/gui-profile.log","a");
+        if(!unmapped||!traffic||!profile){if(unmapped)fclose(unmapped);if(traffic)fclose(traffic);if(profile)fclose(profile);return 0;}
         (void)setvbuf(unmapped,NULL,_IOFBF,65536);
         (void)setvbuf(traffic,NULL,_IOFBF,65536);
         fputs("# GUI logging enabled\n",unmapped);fputs("# GUI logging enabled\n",traffic);
     }
+    profile_close();
     app.m.bus.log=NULL;
     if(app.log)fclose(app.log);
     if(app.m.ma3.trace)fclose(app.m.ma3.trace);
     app.log=unmapped;app.m.bus.log=unmapped;app.m.ma3.trace=traffic;
+    app.m.network.trace=unmapped;
+    if(profile)profile_start(profile);
     app.logging=!!enabled;return 1;
 }
 static int load_model(void)
 {
     Machine pattern = {0};
-    free(app.ghost_pixels);app.ghost_pixels=NULL;
     app.running = 0; release_keys();
     if (!save_storage()) {
         if (app.m.loaded) {
@@ -369,6 +457,10 @@ static int load_model(void)
         }
         *app.nv_input = 0; return 0;
     }
+    free(app.ghost_pixels);app.ghost_pixels=NULL;free(app.ghost_target);app.ghost_target=NULL;
+    free(app.display_pixels);app.display_pixels=NULL;app.display_width=app.display_height=0;
+    app.ghost_writes=app.ghost_commands=app.ghost_changed_at=0;app.ghost_pending=0;
+    profile_close();
     nvram_store_release(&app.storage);
     machine_destroy(&app.m);
     if (app.log) { fflush(app.log); fclose(app.log); app.log = NULL; }
@@ -387,8 +479,19 @@ static int load_model(void)
             MessageBoxA(app.window, app.m.error, "SGHemu - NVM load failed", MB_OK | MB_ICONERROR);
         }
         *app.nv_input = 0;
+        *app.sim_storage=0;
+        if(app.storage.active&&app.m.sim.attached){
+            snprintf(app.sim_storage,sizeof(app.sim_storage),"%s.sim",app.storage.path);
+            if(!sim_card_load_storage(&app.m.sim.card,app.sim_storage)){
+                app.running=0;app.m.cpu.halted=1;app.m.cpu.error="SIM storage load failed";*app.sim_storage=0;
+                MessageBoxA(app.window,app.m.sim.card.error,"SGHemu - SIM storage",MB_OK|MB_ICONERROR);
+            }
+        }
         app.nv_checkpoint = GetTickCount();
         battery_set(&app.m.battery,app.battery_percent,app.charging);
+        app.m.java_extended=app.java_extended;app.cell_revision=~0u;
+        if(app.m.cellular.ready){(void)cellular_set_network(&app.m.cellular,&app.m.bus,app.cell_enabled,app.cell_network);
+            app.m.cellular.mode=app.gsm_mode;phone_net_set_mode(&app.m.network,app.cell_enabled?app.gsm_mode:0);}
         if(app.m.rtc.attached){
             rtc_set_sync(&app.m.rtc,app.host_time);
             if(app.host_time&&!host_sync_rtc(&app.m.rtc)){
@@ -451,10 +554,14 @@ static int load_model(void)
     }
     if(app.m.loaded){size_t bytes=(size_t)app.m.width*app.m.height*sizeof(uint32_t);
         app.ghost_pixels=malloc(bytes);if(app.ghost_pixels)memcpy(app.ghost_pixels,app.m.pixels,bytes);
+        app.ghost_target=malloc(bytes);if(app.ghost_target)memcpy(app.ghost_target,app.m.pixels,bytes);
+        else {free(app.ghost_pixels);app.ghost_pixels=NULL;}
+        app.display_pixels=malloc(bytes);if(app.display_pixels){memcpy(app.display_pixels,app.m.pixels,bytes);app.display_width=app.m.width;app.display_height=app.m.height;}
         app.ghost_tick=GetTickCount();
         app.m.phone_io.mixed=app.m.ma3.hw!=NULL;
         if(!phone_io_open(&app.m.phone_io,!app.m.phone_io.mixed,NULL))app.state="CPU tone output unavailable";
         if(app.m.phone_io.mixed)ma5_hw_set_mixer(app.m.ma3.hw,phone_io_mix,&app.m.phone_io);
+        ma5_hw_set_detune(app.m.ma3.hw,app.ma_detune&&strstr(app.m.name,"C100")!=NULL);
         update_led_icon();}
     return app.m.loaded && !app.m.cpu.halted;
 }
@@ -610,6 +717,8 @@ static void command(unsigned id)
         app.ghosting=!app.ghosting;app.ghost_tick=GetTickCount();
         if(app.ghost_pixels&&app.m.pixels)memcpy(app.ghost_pixels,app.pattern?app.test_pixels:app.m.pixels,
             (size_t)app.m.width*app.m.height*sizeof(uint32_t));
+        if(app.ghost_target&&app.m.pixels)memcpy(app.ghost_target,app.m.pixels,(size_t)app.m.width*app.m.height*sizeof(uint32_t));
+        app.ghost_writes=app.m.lcd.writes;app.ghost_commands=app.m.lcd.commands;app.ghost_pending=0;
         CreateDirectoryA("state",NULL);WritePrivateProfileStringA("look_and_feel","lcd_ghosting",app.ghosting?"1":"0",app.emulator_settings);
         InvalidateRect(app.window,&app.lcd,FALSE);break;
     case ID_BATTERY_PERCENT:
@@ -618,9 +727,30 @@ static void command(unsigned id)
             CW_USEDEFAULT,CW_USEDEFAULT,230,150,app.window,NULL,GetModuleHandleA(NULL),NULL);
         else {ShowWindow(app.battery_window,SW_RESTORE);SetForegroundWindow(app.battery_window);}break;
     case ID_BATTERY_CABLE:
-        if(!app.m.battery.enabled)break;
+        if(!app.m.battery.enabled&&!app.m.battery.charger_port)break;
         app.charging=!app.charging;battery_set(&app.m.battery,app.battery_percent,app.charging);
         CreateDirectoryA("state",NULL);WritePrivateProfileStringA("battery","charging",app.charging?"1":"0",app.emulator_settings);break;
+    case ID_CELL_ENABLED:
+        if(app.m.cellular.ready&&cellular_set_network(&app.m.cellular,&app.m.bus,!app.cell_enabled,app.cell_network)){
+            app.cell_enabled=!app.cell_enabled;phone_net_set_mode(&app.m.network,app.cell_enabled?app.gsm_mode:0);cell_save_settings();}break;
+    case ID_CELL_SMS: cell_open_editor(2);break;
+    case ID_CELL_CALL: cell_open_editor(3);break;
+    case ID_CELL_NETWORK: cell_open_editor(1);break;
+    case ID_GSM_OFF:case ID_GSM_INTERNET:case ID_GSM_GATEWAY:
+        app.gsm_mode=id-ID_GSM_OFF;app.m.cellular.mode=app.gsm_mode;phone_net_set_mode(&app.m.network,app.cell_enabled?app.gsm_mode:0);cell_save_settings();
+        if(id==ID_GSM_GATEWAY)MessageBoxA(app.window,
+            "In the phone's WAP browser profile settings, enter:\r\n\r\n"
+            "Gateway IP address: 10.0.0.1\r\nSecurity: Non-secure\r\nPort (if shown): 9201\r\n\r\n"
+            "On the C100, use # to enter the dots in the IP address.\r\n\r\n"
+            "Test homepage: http://sghemu.local/\r\n\r\n"
+            "Make sure Cellular is enabled, then open the phone's WAP browser.",
+            "SGHemu - Set up the built-in WAP gateway",MB_OK|MB_ICONINFORMATION);break;
+    case ID_JAVA_EXTENDED:
+        app.java_extended=!app.java_extended;CreateDirectoryA("state",NULL);
+        WritePrivateProfileStringA("emulation","extended_java_buffers",app.java_extended?"1":"0",app.emulator_settings);break;
+    case ID_TEXT_INPUT:
+        release_keys();app.text_input=!app.text_input;CreateDirectoryA("state",NULL);
+        WritePrivateProfileStringA("emulation","keyboard_text_input",app.text_input?"1":"0",app.emulator_settings);break;
     case ID_HIGH_PRIORITY:
         if(!host_high_priority(!app.high_priority)){
             char message[160];snprintf(message,sizeof(message),"Windows could not change process priority (error %lu).",(unsigned long)GetLastError());
@@ -645,6 +775,10 @@ static void command(unsigned id)
             WritePrivateProfileStringA("audio","enabled",app.audio_enabled?"1":"0",app.audio_settings);
         }
         break;
+    case ID_MA_DETUNE:
+        app.ma_detune=!app.ma_detune;
+        ma5_hw_set_detune(app.m.ma3.hw,app.ma_detune&&strstr(app.m.name,"C100")!=NULL);
+        CreateDirectoryA("state",NULL);WritePrivateProfileStringA("look_and_feel","c100_ma_detune",app.ma_detune?"1":"0",app.emulator_settings);break;
     case ID_SIM:
         if (app.m.sim.attached && save_storage()) {
             int running=app.running,previous=app.sim_override;
@@ -657,12 +791,12 @@ static void command(unsigned id)
     case ID_NV_LOAD: choose_nvram(); break;
     case ID_USERFS:
         if(!app.fs_window)CreateWindowExA(0,"SGHemuFilesystem","SGHemu - phone filesystem manager",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VISIBLE,
-            CW_USEDEFAULT,CW_USEDEFAULT,640,480,app.window,NULL,GetModuleHandleA(NULL),NULL);
+            CW_USEDEFAULT,CW_USEDEFAULT,1020,580,app.window,NULL,GetModuleHandleA(NULL),NULL);
         else {fs_refresh();ShowWindow(app.fs_window,SW_RESTORE);SetForegroundWindow(app.fs_window);}break;
     case ID_RUN:
         if (app.m.loaded && !app.m.cpu.halted) { app.running = 1; app.state = "Running"; }
         break;
-    case ID_PAUSE: app.running = 0; app.state = "Paused"; (void)save_storage(); break;
+    case ID_PAUSE: app.running = 0; release_keys(); app.state = "Paused"; (void)save_storage(); break;
     case ID_STEP: {
         int provision;
         app.running = 0;
@@ -710,10 +844,11 @@ static void command(unsigned id)
 }
 static HMENU make_menu(void)
 {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), emulation = CreatePopupMenu(), view = CreatePopupMenu(), help = CreatePopupMenu(),battery=CreatePopupMenu();
+    HMENU bar = CreateMenu(), file = CreatePopupMenu(), emulation = CreatePopupMenu(), view = CreatePopupMenu(), battery=CreatePopupMenu(),cell=CreatePopupMenu(),gsm=CreatePopupMenu();
     AppendMenuA(file, MF_STRING, ID_OPEN_FOLDER, "Open &firmware folder...\tCtrl+O");
     HMENU look=CreatePopupMenu();
     AppendMenuA(look,MF_STRING,ID_LCD_GHOSTING,"LCD ghosting");
+    AppendMenuA(look,MF_STRING,ID_MA_DETUNE,"C100 MA detune (-12.5 cents)");
     AppendMenuA(file, MF_STRING, ID_OPEN_MODEL, "Open &model config (advanced)...");
     AppendMenuA(file, MF_STRING, ID_NV_LOAD, "Import NVM snapshot and reset...");
     AppendMenuA(file, MF_STRING, ID_USERFS, "Phone filesystem manager...");
@@ -725,18 +860,27 @@ static HMENU make_menu(void)
     AppendMenuA(emulation, MF_STRING, ID_CONTINUE, "Diagnostic: continue &unknown accesses");
     AppendMenuA(emulation, MF_STRING, ID_SIM, "Virtual &SIM inserted (reset)");
     AppendMenuA(emulation, MF_STRING, ID_HIGH_PRIORITY, "High process priority");
+    AppendMenuA(emulation, MF_STRING, ID_JAVA_EXTENDED, "Extended Java buffers (next import/reset)");
     AppendMenuA(emulation, MF_STRING, ID_HOST_TIME, "Sync phone date/time to Windows");
+    AppendMenuA(emulation, MF_STRING, ID_TEXT_INPUT, "Keyboard text input (abc/ABC)\tCtrl+T");
     AppendMenuA(battery,MF_STRING,ID_BATTERY_PERCENT,"Set percentage...");
     AppendMenuA(battery,MF_STRING,ID_BATTERY_CABLE,"Charging cable connected");
     AppendMenuA(emulation,MF_POPUP,(UINT_PTR)battery,"Battery");
+    AppendMenuA(cell,MF_STRING,ID_CELL_ENABLED,"Cellular enabled");
+    AppendMenuA(cell,MF_STRING,ID_CELL_SMS,"Send SMS to phone...");
+    AppendMenuA(cell,MF_STRING,ID_CELL_CALL,"Call phone...");
+    AppendMenuA(cell,MF_STRING,ID_CELL_NETWORK,"Network name...");
+    AppendMenuA(gsm,MF_STRING,ID_GSM_OFF,"Off");
+    AppendMenuA(gsm,MF_STRING,ID_GSM_INTERNET,"Internet");
+    AppendMenuA(gsm,MF_STRING,ID_GSM_GATEWAY,"Internet + built-in WAP gateway");
+    AppendMenuA(cell,MF_POPUP,(UINT_PTR)gsm,"GSM");AppendMenuA(emulation,MF_POPUP,(UINT_PTR)cell,"Cellular");
     AppendMenuA(emulation, MF_SEPARATOR, 0, NULL);
     AppendMenuA(emulation, MF_STRING, ID_AUDIO, "Experimental hardware &audio (reset)");
     AppendMenuA(emulation, MF_STRING, ID_AUDIO_IMPORT, "Import Yamaha hardware DLL...");
     AppendMenuA(view, MF_STRING, ID_ZOOM1, "LCD zoom &1x"); AppendMenuA(view, MF_STRING, ID_ZOOM2, "LCD zoom &2x"); AppendMenuA(view, MF_STRING, ID_ZOOM3, "LCD zoom &3x");
     AppendMenuA(view, MF_SEPARATOR, 0, NULL); AppendMenuA(view, MF_STRING, ID_PATTERN, "LCD &test pattern"); AppendMenuA(view, MF_STRING, ID_DIAGNOSTICS, "&Diagnostics...");
-    AppendMenuA(help, MF_STRING, ID_ABOUT, "&About / keyboard controls...");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "&File"); AppendMenuA(bar, MF_POPUP, (UINT_PTR)emulation, "&Emulation");
-    AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "&View"); AppendMenuA(bar,MF_POPUP,(UINT_PTR)look,"L&&F"); AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help"); return bar;
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "&View"); AppendMenuA(bar,MF_POPUP,(UINT_PTR)look,"L&&F"); return bar;
 }
 static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam, int *handled)
 {
@@ -760,7 +904,9 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
     if (message == WM_EXITMENULOOP) { app.menu_active = 0; return 0; }
     if (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) { release_keys(); update_ui(); }
     if (message == WM_TIMER) {
-        update_led_icon();if(app.ghosting){ghost_frame();InvalidateRect(window,&app.lcd,FALSE);}
+        fs_tick();cell_tick();update_led_icon();if(app.ghosting){ghost_frame();InvalidateRect(window,&app.lcd,FALSE);}
+        if(app.display_pixels){const uint32_t *frame=app.ghosting&&app.ghost_pixels?app.ghost_pixels:app.pattern?app.test_pixels:app.m.pixels;
+            if(frame)memcpy(app.display_pixels,frame,(size_t)app.display_width*app.display_height*sizeof(uint32_t));}
         if(app.host_time&&app.m.rtc.attached&&GetTickCount()-app.time_checkpoint>=1000){
             app.time_checkpoint=GetTickCount();(void)host_sync_rtc(&app.m.rtc);
         }
@@ -784,10 +930,19 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
                 app.running = 1; app.state = initialize_defaults ? "First boot - creating persistent defaults" : "Running - initialized NVM";
             }
         } else if (wparam == EMU_IMPORT_DONE) {
-            SetWindowTextA(app.fs_status, app.content.type==10 ? (app.content.size ? "Native Java installer started. Follow the phone screen; wait for Installed before closing." : "Native Java menu opened on the phone screen.") : "Import accepted by the guest; the flash task stores it as the boot continues.");
+            int java=app.content.type==10,install=app.content.size!=0;
+            if(app.import_current<app.import_count&&app.imports[app.import_current].status==1){
+                app.imports[app.import_current].status=2;
+                app.imports[app.import_current].accepted=app.m.cpu.instructions;
+            }
             content_import_release(&app.content); /* The guest keeps only its own copy in guest RAM. */
             fs_refresh();
+            SetWindowTextA(app.fs_status, java ? (install ? "Native Java installer running; compilation can take minutes.\r\nWait for Installed, then press the phone's Close softkey before opening Java games.\r\nLarge apps may need Emulation > Extended Java buffers, then reimport." : "Native Java menu opened on the phone screen.") : "Import accepted by the guest; the flash task stores it as the boot continues.");
         } else if (wparam == EMU_IMPORT_FAILED) {
+            if(app.import_current<app.import_count&&app.imports[app.import_current].status==1){
+                ImportItem *item=&app.imports[app.import_current];item->status=4;
+                snprintf(item->error,sizeof(item->error),"%.170s",app.content.error);app.import_running=0;
+            }
             MessageBoxA(app.window, app.content.error, "SGHemu - import failed", MB_OK | MB_ICONERROR);
             content_import_release(&app.content);
         }
@@ -796,19 +951,29 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
     if (message == WM_PAINT) {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(window, &ps);
+        HDC target_dc=dc,buffer_dc=NULL;HBITMAP buffer=NULL,previous=NULL;RECT client;
         BITMAPINFO bitmap = {0};
-        const uint32_t *pixels = app.ghosting&&app.ghost_pixels?app.ghost_pixels:app.pattern?app.test_pixels:app.m.pixels;
+        const uint32_t *pixels = app.display_pixels;
         /* Layout invalidates without WM_ERASEBKGND. Clear the paint region so
            shrinking/moving the LCD cannot leave its old pixels behind. The DC
            clips child buttons and regions outside the current update area. */
-        FillRect(dc, &ps.rcPaint, GetSysColorBrush(COLOR_BTNFACE));
+        /* Compose in memory and present once. Erasing the live LCD before
+           StretchDIBits made periodic background-colored flashes visible. */
+        GetClientRect(window,&client);
+        if(client.right>0&&client.bottom>0){buffer_dc=CreateCompatibleDC(dc);
+            if(buffer_dc)buffer=CreateCompatibleBitmap(dc,client.right,client.bottom);
+            if(buffer){previous=(HBITMAP)SelectObject(buffer_dc,buffer);target_dc=buffer_dc;}}
+        FillRect(target_dc, &ps.rcPaint, GetSysColorBrush(COLOR_BTNFACE));
         if (pixels) {
-            bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bitmap.bmiHeader.biWidth = (LONG)app.m.width;
-            bitmap.bmiHeader.biHeight = -(LONG)app.m.height; bitmap.bmiHeader.biPlanes = 1; bitmap.bmiHeader.biBitCount = 32; bitmap.bmiHeader.biCompression = BI_RGB;
-            SetStretchBltMode(dc, COLORONCOLOR);
-            StretchDIBits(dc, app.lcd.left, app.lcd.top, app.lcd.right - app.lcd.left, app.lcd.bottom - app.lcd.top,
-                0, 0, (int)app.m.width, (int)app.m.height, pixels, &bitmap, DIB_RGB_COLORS, SRCCOPY);
-        } else FillRect(dc, &app.lcd, (HBRUSH)GetStockObject(BLACK_BRUSH));
+            bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bitmap.bmiHeader.biWidth = (LONG)app.display_width;
+            bitmap.bmiHeader.biHeight = -(LONG)app.display_height; bitmap.bmiHeader.biPlanes = 1; bitmap.bmiHeader.biBitCount = 32; bitmap.bmiHeader.biCompression = BI_RGB;
+            SetStretchBltMode(target_dc, COLORONCOLOR);
+            StretchDIBits(target_dc, app.lcd.left, app.lcd.top, app.lcd.right - app.lcd.left, app.lcd.bottom - app.lcd.top,
+                0, 0, (int)app.display_width, (int)app.display_height, pixels, &bitmap, DIB_RGB_COLORS, SRCCOPY);
+        } else FillRect(target_dc, &app.lcd, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        if(buffer){BitBlt(dc,ps.rcPaint.left,ps.rcPaint.top,ps.rcPaint.right-ps.rcPaint.left,ps.rcPaint.bottom-ps.rcPaint.top,
+            buffer_dc,ps.rcPaint.left,ps.rcPaint.top,SRCCOPY);SelectObject(buffer_dc,previous);DeleteObject(buffer);}
+        if(buffer_dc)DeleteDC(buffer_dc);
         EndPaint(window, &ps); return 0;
     }
     if (message == WM_CLOSE) {
@@ -822,7 +987,7 @@ static LRESULT window_message(HWND window, UINT message, WPARAM wparam, LPARAM l
         if(app.battery_window)DestroyWindow(app.battery_window);
         nvram_store_release(&app.storage);
         content_import_release(&app.content);
-        machine_destroy(&app.m); free(app.test_pixels);free(app.ghost_pixels);
+        profile_close();machine_destroy(&app.m); free(app.test_pixels);free(app.ghost_pixels);free(app.ghost_target);free(app.display_pixels);
         {unsigned i;for(i=0;i<8;++i)if(app.led_icons[i])DestroyIcon(app.led_icons[i]);} if (app.log) fclose(app.log);
         if (app.font) DeleteObject(app.font); PostQuitMessage(0); return 0;
     }
@@ -832,7 +997,7 @@ static int window_needs_lock(UINT message)
 {
     switch (message) {
     case WM_CREATE: case WM_SIZE: case WM_PHONE_KEY: case WM_COMMAND: case WM_ENTERMENULOOP:
-    case WM_EXITMENULOOP: case WM_ACTIVATE: case WM_TIMER: case WM_PAINT: case WM_CLOSE:
+    case WM_EXITMENULOOP: case WM_ACTIVATE: case WM_TIMER: case WM_CLOSE:
     case WM_DESTROY: case WM_EMU_EVENT: return 1;
     default: return 0;
     }
@@ -842,6 +1007,10 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
     LRESULT result; int handled;
     /* Everything else (mouse move, hit-testing, move/size loops) never touches
        app.m, so it must not wait for the emulation thread. */
+    if(message==WM_ERASEBKGND)return 1;
+    if(message==WM_PAINT)return window_message(window,message,wparam,lparam,&handled);
+    if(message==WM_TIMER&&WaitForSingleObject(emu_mutex,2)!=WAIT_OBJECT_0){if(profile_enabled)InterlockedIncrement(&profile_skipped);return 0;}
+    if(message==WM_TIMER){result=window_message(window,message,wparam,lparam,&handled);emu_unlock();return result;}
     if (!window_needs_lock(message)) return DefWindowProcA(window, message, wparam, lparam);
     emu_lock(); result = window_message(window, message, wparam, lparam, &handled); emu_unlock();
     return handled ? result : DefWindowProcA(window, message, wparam, lparam);
@@ -852,9 +1021,12 @@ static void emu_slice(LONGLONG frequency, int paced)
 {
     unsigned i, limit = paced ? 20000u : 120000u;
     LARGE_INTEGER start, now;
-    LONGLONG budget = frequency * 8 / 1000; /* 8 ms wall clock per slice */
+    LONGLONG budget = frequency * 2 / 1000; /* Short slices keep input responsive. */
     QueryPerformanceCounter(&start);
     for (i = 0; i < limit; ++i) {
+        if(!(i%1000))ghost_capture();
+        if(!(i%1000)&&(app.text_keys.count||app.text_keys.pressed))text_step();
+        if(gui_profile.file&&!(i&1023))profile_sample(app.m.cpu.r[15]);
         int provision = nvram_store_step(&app.storage, &app.m);
         if (!provision) {
             app.running = 0; app.state = "Paused - first-boot provisioning failed";
@@ -866,11 +1038,11 @@ static void emu_slice(LONGLONG frequency, int paced)
             app.running = 0; /* idle until the GUI thread has reloaded the model */
             PostMessageA(app.window, WM_EMU_EVENT, EMU_RELOAD, 0); return;
         }
-        if((app.m.battery.stage||!(app.content.active&&!app.content.done&&!app.content.failed))&&
+        if(!app.m.cellular.stage&&(app.m.battery.stage||!(app.content.active&&!app.content.done&&!app.content.failed))&&
            !battery_step(&app.m.battery,&app.m.cpu)){
             app.running=0;app.state="Battery event failed";return;
         }
-        if (!app.m.battery.stage && app.content.active && !app.content.done && !app.content.failed) {
+        if (!app.m.cellular.stage && !app.m.battery.stage && app.content.active && !app.content.done && !app.content.failed) {
             int imported = content_import_step(&app.content, &app.m);
             if (!imported) {
                 app.running = 0;
@@ -881,6 +1053,11 @@ static void emu_slice(LONGLONG frequency, int paced)
             if (imported == 2) PostMessageA(app.window, WM_EMU_EVENT, EMU_IMPORT_DONE, 0);
         }
         if (!machine_step(&app.m, app.continuation)) {
+            const char *reason=app.m.cpu.error?app.m.cpu.error:"unmapped access";FILE *files[2]={app.log,gui_profile.file};unsigned f;
+            for(f=0;f<2;++f)if(files[f]){unsigned reg;
+                fprintf(files[f],"# STOP pc=%08x last_pc=%08x opcode=%08x cpsr=%08x reason=%s\n",
+                    app.m.cpu.r[15],app.m.cpu.last_pc,app.m.cpu.last_opcode,app.m.cpu.cpsr,reason);
+                for(reg=0;reg<16;++reg)fprintf(files[f],"r%u=%08x%s",reg,app.m.cpu.r[reg],reg%4==3?"\n":" ");fflush(files[f]);}
             app.running = 0; app.state = app.m.cpu.halted ? "CPU stopped - see diagnostics" : "Unknown hardware - stopped"; return;
         }
         if (!(i % 1000)) {
@@ -900,12 +1077,15 @@ static unsigned __stdcall emu_main(void *argument)
         if (WaitForSingleObject(emu_mutex, 20) != WAIT_OBJECT_0) continue;
         if (app.running && app.m.loaded && !app.m.cpu.halted) {
             paced = app.m.ma3.hw != NULL || app.m.phone_io.output != NULL; ran = 1;
-            emu_slice(frequency.QuadPart, paced);
+            if(gui_profile.file){LARGE_INTEGER before={0},after={0};uint64_t ticks;QueryPerformanceCounter(&before);
+                emu_slice(frequency.QuadPart,paced);QueryPerformanceCounter(&after);ticks=(uint64_t)(after.QuadPart-before.QuadPart);
+                ++gui_profile.slices;gui_profile.busy_ticks+=ticks;if(ticks>gui_profile.max_slice)gui_profile.max_slice=ticks;
+            }else emu_slice(frequency.QuadPart,paced);
         }
+        profile_emit(0);
         ReleaseMutex(emu_mutex);
         if (!ran) Sleep(10);
-        else if (!paced) Sleep(16); /* no audio clock: same cadence as the old 16 ms timer */
-        else SwitchToThread();
+        else SwitchToThread(); /* No artificial 16 ms throttle without audio. */
     }
     return 0;
 }
@@ -916,6 +1096,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     MSG message;
     HACCEL accelerator;
     ACCEL keys[] = {{FVIRTKEY | FCONTROL, 'O', ID_OPEN_FOLDER}, {FVIRTKEY | FCONTROL, 'R', ID_RESET},
+        {FVIRTKEY | FCONTROL, 'T', ID_TEXT_INPUT},
         {FVIRTKEY, VK_F5, ID_RUN}, {FVIRTKEY, VK_F6, ID_PAUSE}, {FVIRTKEY, VK_F10, ID_STEP}};
     char executable[1024], *slash;
     int exit_code;
@@ -934,8 +1115,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     GetFullPathNameA("state/audio.ini",sizeof(app.audio_settings),app.audio_settings,NULL);
     GetFullPathNameA("state/emulator.ini",sizeof(app.emulator_settings),app.emulator_settings,NULL);
     app.ghosting=GetPrivateProfileIntA("look_and_feel","lcd_ghosting",0,app.emulator_settings)!=0;
+    app.ma_detune=GetPrivateProfileIntA("look_and_feel","c100_ma_detune",0,app.emulator_settings)!=0;
     app.icon_led=~0u;
     app.host_time=GetPrivateProfileIntA("emulation","sync_time",1,app.emulator_settings)!=0;
+    app.text_input=GetPrivateProfileIntA("emulation","keyboard_text_input",0,app.emulator_settings)!=0;
+    app.cell_enabled=GetPrivateProfileIntA("cellular","enabled",1,app.emulator_settings)!=0;
+    app.gsm_mode=GetPrivateProfileIntA("cellular","gsm_mode",0,app.emulator_settings);if(app.gsm_mode>2)app.gsm_mode=0;
+    GetPrivateProfileStringA("cellular","network","Tele2",app.cell_network,sizeof(app.cell_network),app.emulator_settings);
+    app.java_extended=GetPrivateProfileIntA("emulation","extended_java_buffers",0,app.emulator_settings)!=0;
     app.battery_percent=GetPrivateProfileIntA("battery","percent",100,app.emulator_settings);
     if(app.battery_percent>100)app.battery_percent=100;
     app.charging=GetPrivateProfileIntA("battery","charging",0,app.emulator_settings)!=0;
@@ -971,6 +1158,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     if(!RegisterClassExA(&cls))return 1;
     cls.lpszClassName="SGHemuBattery";cls.lpfnWndProc=battery_proc;
     if(!RegisterClassExA(&cls))return 1;
+    cls.lpszClassName="SGHemuCellular";cls.lpfnWndProc=cell_editor_proc;if(!RegisterClassExA(&cls))return 1;
+    cls.lpszClassName="SGHemuCall";cls.lpfnWndProc=call_proc;if(!RegisterClassExA(&cls))return 1;
     cls.lpszClassName="SGHemuWindow";cls.lpfnWndProc=window_proc;
     if (!CreateWindowExA(0, "SGHemuWindow", "SGHemu - Samsung SGH-C100", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 400, 800, NULL, NULL, instance, NULL)) return 1;
@@ -984,6 +1173,29 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     }
     while ((exit_code = GetMessageA(&message, NULL, 0, 0)) > 0) {
         if (TranslateAcceleratorA(app.window, accelerator, &message)) continue;
+        if(!app.menu_active&&(message.hwnd==app.window||IsChild(app.window,message.hwnd))){
+            if(message.message==WM_KEYUP&&message.wParam<256&&app.vk_keys[message.wParam]==-2){
+                app.vk_keys[message.wParam]=-1;continue;
+            }
+            if(app.text_input&&!(GetKeyState(VK_CONTROL)&0x8000)&&!(GetKeyState(VK_MENU)&0x8000)){
+                if(message.message==WM_CHAR){int accepted;
+                    emu_lock();accepted=app.running&&app.m.loaded&&key_text_char(&app.text_keys,(unsigned)message.wParam);emu_unlock();
+                    if(!accepted)MessageBeep(MB_OK);continue;
+                }
+                if(message.message==WM_KEYDOWN){unsigned vk=(unsigned)message.wParam;int key=keyboard_key(message.wParam),queued=0;
+                    if((vk>='A'&&vk<='Z')||vk==VK_SPACE||vk==VK_OEM_PERIOD){TranslateMessage(&message);continue;}
+                    if(vk==VK_ESCAPE){emu_lock();release_keys();emu_unlock();continue;}
+                    /* A quick Enter/softkey/backspace must follow queued text,
+                       not overtake it. Preserve normal held keypad input otherwise. */
+                    emu_lock();
+                    if(key>=0&&app.running&&app.m.loaded&&(vk==VK_BACK||app.text_keys.count||app.text_keys.pressed)){
+                        queued=key_text_key(&app.text_keys,(unsigned)key)?1:-1;
+                        if(vk<256)app.vk_keys[vk]=-2;
+                    }
+                    emu_unlock();if(queued){if(queued<0)MessageBeep(MB_OK);continue;}
+                }
+            }
+        }
         if (!app.menu_active && (message.hwnd == app.window || IsChild(app.window, message.hwnd)) && message.wParam < 256 &&
             (message.message == WM_KEYDOWN || message.message == WM_KEYUP)) {
             unsigned vk = (unsigned)message.wParam;
@@ -993,8 +1205,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
                 unsigned i;
                 app.vk_keys[vk] = message.message == WM_KEYUP ? -1 : key;
                 for (i = 0; i < 256; ++i) if (app.vk_keys[i] >= 0) held |= 1u << app.vk_keys[i];
-                app.keyboard_keys = held;
-                emu_lock(); phone_key((unsigned)key, !!(held & (1u << key)), 0); emu_unlock(); continue;
+                emu_lock(); app.keyboard_keys = held;
+                phone_key((unsigned)key, !!(held & (1u << key)), 0); emu_unlock(); continue;
             }
         }
         /* Dialog navigation must not consume Alt+menu mnemonics. */

@@ -1,4 +1,5 @@
 #include "phone_io.h"
+#include "gpio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,18 @@ int main(void){Bus bus={0};Arm7 cpu={0};PhoneIo io={0};uint8_t ram[1024]={0};uin
         io.amplitude[0]=io.render_amplitude[0]=20000;io.phase[0]=3.14159265358979323846/2;io.step[0]=0;
         left[0]=32000;right[0]=-32000;phone_io_mix(&io,left,right,1);
         CHECK(left[0]==32767&&right[0]==-12000);
+    }
+    {GpioPort port={0};unsigned color;
+        CHECK(gpio_port_attach(&port,&bus,0x4028c,0));
+        port.output_changed=phone_io_gpio_write;port.output_context=&io;io.hardware_led=1;
+        for(color=0;color<8;++color){unsigned bits=((color&1)<<5)|((color&2)<<2)|((color&4)<<4);
+            bus.ticks=100+color;bus_write(&bus,0x4028c,2,(bits<<8)|0x68);
+            CHECK(io.led==color&&io.led_tick==100+color);}
+        before=io.led_tick;bus.ticks=200;bus_write(&bus,0x4028c,2,0x0101);
+        CHECK(io.led==7&&io.led_tick==before); /* unrelated pin cannot override MA LED */
+        bus_write(&bus,0x4028c,2,0x2020);CHECK(io.led==7&&io.led_tick==200);
+        cpu.r[15]=io.gpio_entry;cpu.r[0]=5;cpu.r[1]=0;phone_io_observe(&io,&cpu);
+        CHECK(io.led==7); /* legacy function observer cannot override real GPIO */
     }
     phone_io_close(&io);CHECK(!io.output);bus_destroy(&bus);
     printf("CPU tone/LED output: %u checks passed.\n",checks);return 0;

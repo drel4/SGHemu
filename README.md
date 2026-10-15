@@ -1,10 +1,16 @@
 # SGHemu
 
 Samsung SGH feature-phone emulator, starting with SGH-C100 / Skyworks CX805.
-Runtime and tools are plain **C17**, MSVC **2026 x86**, `/W4 /WX /RTC1`.
+Runtime and tools are plain **C17**, MSVC **2026 x86**, `/W4 /WX`.
+Release uses `/O2 /GL /LTCG /MT`; Debug enables `/RTC1`.
 Windows 7 API/subsystem target; actual execution on Windows 7 is untested.
 
 [Download Windows x86 builds](https://github.com/drel4/SGHemu/releases).
+
+> **Firmware compatibility:** most functionality is currently available for
+> **C100XEDK1**. C100XEDA2 and C100XEDD1 have more limited bring-up support;
+> reaching standby does not mean they support the same features. SGHemu is
+> designed for multiple models, but other SGH models are not supported yet.
 
 ## Phone output and appearance
 
@@ -14,11 +20,17 @@ without Yamaha DLLs. The program icon shows the native RGB service-LED color.
 it does not alter guest pixels or screenshots. See
 [implementation and verification](docs/c100-phone-output.md).
 
-**File -> Logging** toggles both `build/gui-unmapped.log` and
-`build/gui-ma3-traffic.log` while running, without resetting the phone.
+**L&F -> C100 MA detune (-12.5 cents)** optionally lowers Yamaha output pitch
+to approximate the reported C100 detuning. It is off by default and saved;
+CPU navigation tones are unchanged. This clock-style effect also lengthens MA
+playback by about 0.72%; the exact hardware offset is not independently verified.
+
+**File -> Logging** toggles `build/gui-unmapped.log`,
+`build/gui-ma3-traffic.log` and `build/gui-profile.log` while running, without resetting the phone.
 Logging is off by default, saved under `[diagnostics] logging` in
 `state/emulator.ini`, and appends across toggles/resets. The old audio-only
-`[audio] trace` setting no longer enables GUI logging.
+`[audio] trace` setting no longer enables GUI logging. Performance profiling is
+also off when logging is off; see [reading performance reports](docs/performance-profiling.md).
 
 ## AI-assisted project
 
@@ -28,24 +40,34 @@ This notice is not an additional restriction on the WTFPL license.
 ## Current milestone
 
 The C100 firmware now reaches **normal standby with a virtual SIM**, showing
-**No Service**, wallpaper, and the Menu / Name soft keys.
+wallpaper and the Menu / Name soft keys. XEDK1 also has an experimental virtual
+carrier for calls and SMS; other profiles still show **No Service**.
 Pixels come from the guest's x16 LCD writes, not an extracted asset or host UI.
 C100XEDA2, C100XEDD1 and C100XEDK1 have all passed SIM initialization and
 standby captures. This is experimental hardware bring-up, not a complete phone:
-unknown MMIO still continues and clocks are uncalibrated. Experimental MA-3
+unknown MMIO still continues and overall timing remains provisional, although
+the clock tree uses firmware-derived clock modes. Experimental MA-3
 translation now renders guest startup audio through the MA-5 hardware DLL;
 volume/configuration compatibility remains incomplete. The guest keypad matrix is connected. The default strict profile still stops on unknown
 hardware; folder import selects the documented bring-up profile.
 
-Implemented: shared ARM7TDMI ARM/Thumb interpreter, ROM/RAM/config loader,
+Implemented: shared ARM7TDMI ARM/Thumb interpreter ([optimization and checks](docs/arm7-optimization.md)), ROM/RAM/config loader,
 flash command/status handling, interrupt routing with a diagnostic frame source,
 LCD command/data ports, and the observed PMIC serial-pin protocol. See
 [LCD/boot evidence](docs/c100-lcd.md) and [memory map](docs/c100-memory-map.md).
+The C100XEDK1 profile now uses GPIO registers for charger detection and service
+LED output, plus an ARM/DSP ADC mailbox subset for battery measurements; these
+paths no longer depend on firmware function addresses. Native firmware handles
+battery conversion/filtering and charging animation. This is not a full DSP/RF
+implementation. Navigation tones, virtual cellular/WAP and content-import helpers
+still have firmware-specific bindings. See [battery support](docs/c100-battery.md)
+and [ADC mailbox](docs/cx805-adc-mailbox.md).
 The bring-up frontend now provisions missing NVM using the firmware's own
 factory-sector formatter and initialization-marker writer, saves it, and cold
 resets. Normal startup then creates defaults and initializes the virtual SIM.
-Removing the virtual card restores **Insert SIM Card**. No radio/network is
-emulated; **No Service** is expected. See [SIM implementation and evidence](docs/c100-sim.md).
+Removing the virtual card restores **Insert SIM Card**. No physical GSM radio is
+emulated; the XEDK1 virtual carrier can provide local service, while unbound
+profiles still show **No Service**. See [SIM implementation and evidence](docs/c100-sim.md).
 Existing saves load automatically without formatting. This uses a narrowly
 verified internal-ROM version query, not fabricated BIST results. See
 [internal-ROM analysis and UI evidence](docs/c100-irom.md).
@@ -57,7 +79,7 @@ records, blank-flash initialization and the reported 300 KB user quota.
 ## Build and run
 
 ```powershell
-.\build.cmd
+.\build.cmd release
 .\build\sghemu-gui.exe
 ```
 
@@ -81,6 +103,14 @@ The native window contains only the LCD, native keypad buttons beneath it, and
 the top menu. F5 runs, F6 pauses, F10 steps, Ctrl+R resets (paused). State and
 hardware counters are in View > Diagnostics. Buttons drive the firmware-scanned
 keypad matrix. See [GUI controls](docs/native-gui.md) and [keypad mapping](docs/c100-keypad.md).
+**Emulation > Keyboard text input (abc/ABC)**, or **Ctrl+T**, lets you type English
+letters, spaces and periods directly while a phone text field is active. Select
+the phone's English **abc/ABC** multi-tap mode (not T9) first; case follows the
+phone's selected mode. Each character generates timed numeric keypad taps followed
+by Right, so consecutive letters on the same key do not require waiting. Numbers
+remain direct phone keypad presses. Backspace deletes; Esc cancels queued typing.
+Queued text is discarded on focus loss, pause or reset. The toggle is saved;
+turn it off to restore Space as the phone's OK button.
 **Emulation > Virtual SIM inserted (reset)** toggles the card with a cold reset.
 **Emulation > Import Yamaha hardware DLL...** enables experimental audio;
 select the pinned `M5_EmuHw.dll`, then press F5. Settings live in `state/audio.ini`.
@@ -122,9 +152,10 @@ by default and appends when enabled; CLI diagnostic runs use their own logs. Fla
 
 ## Verification
 
-`build.cmd release` runs **1,454 checks** covering ARM/Thumb, memory and
+`build.cmd release` runs synthetic and differential checks covering ARM/Thumb, memory and
 peripherals, firmware detection, NVM, keypad/SIM, MA-3, content/JAR imports,
-RTC, CPU tone/LED mixing and ADPCM lookahead. Synthetic tests require no
+RTC, CPU tone/LED mixing, GPIO/ADC mailbox, decode-cache equivalence, peripheral
+deadline scheduling and ADPCM lookahead. Synthetic tests require no
 proprietary inputs. Optional real-ROM
 regressions, compiled by the same build:
 
@@ -173,12 +204,18 @@ belong to one audio thread. Volume mapping and some chip controls are provisiona
 PCM/ADPCM stream interrupts, refill timing and sample-position reads are now
 translated, but compatibility remains incomplete. The phone filesystem manager
 supports directory inspection, TSV export, NVM backup and content import on
-C100 XEDK1. **Import content...** accepts sounds, PNG/JPEG/GIF/BMP pictures and
+C100 XEDK1. **File -> Phone filesystem...** opens a two-pane manager: host import
+queue on the left, phone files on the right. **Add files...** accepts sounds, PNG/JPEG/GIF/BMP pictures and
 CLDC 1.0 / MIDP 1.0 JARs. Pictures are fitted to 128 x 128 (first frame only).
-JARs run through the phone's native installer; wait for **Installed**, then close
-the phone dialog. **Java games** reboots into the native MIDlet menu using the
+Use **Import queue >>** for bulk loading; each item is saved before the next
+starts. JARs run through the phone's native installer. **Java games** reboots into the native MIDlet menu using the
 saved NVM. Other firmware profiles do not yet declare these installer entries.
 The handset's own Java menu is WAP & Games -> Downloads -> Games and more.
+For larger apps, enable **Emulation -> Extended Java buffers (next import/reset)**
+before importing again. This optional compatibility mode enlarges the native
+installer's working buffers to 1 MiB each; this is **not original hardware behavior**.
+It is off by default and does not replace the native installer or VM. Compilation
+can take minutes. A MIDP 1.0 manifest alone does not guarantee an app will run.
 The **Emulation** menu also provides **High process priority** (off by default)
 and **Sync phone date/time to Windows** (on by default for C100 bring-up profiles).
 Priority changes take effect immediately; switching it off restores Normal.
@@ -186,6 +223,24 @@ Host sync uses Windows local time, including its timezone/DST settings. Switchin
 sync off allows handset clock changes and advances the RTC with emulated time.
 These preferences persist in `state/emulator.ini`; phone NVM stays model-local.
 CLI equivalents: `--high-priority` and `--rtc-sync` (both opt-in on the CLI).
+
+**Emulation -> Cellular** (XEDK1) provides an enabled toggle, a custom network
+name (default **Tele2**), **Send SMS to phone...** and **Call phone...**. Dialing
+from the handset opens a host **Incoming call from phone** window with
+**Accept / Decline**, then **Hang up** when connected. These are local simulated
+calls/messages, not connections to a real operator; voice-call audio is not
+implemented. Incoming SMS can be read and replied to in the native phone menus.
+SIM contacts, SMS and message parameters are automatically saved beside each
+firmware's NVM as `.snv.sim` and restored on reset/startup.
+
+**Cellular -> GSM** selects **Off**, **Internet**, or **Internet + built-in WAP
+gateway** (packet data only). Selecting the built-in gateway shows setup
+instructions: gateway IP **10.0.0.1**, non-secure WAP, port **9201**; test homepage
+**http://sghemu.local/**. Configure these in the phone's WAP browser profile.
+The C gateway uses Windows HTTP/HTTPS fetching and a small text/link conversion
+for old WAP browsers. This is experimental WAP/UDP transport, not complete GSM,
+Java TCP networking, WTLS or a full HTML browser. See
+[cellular and SIM details](docs/c100-cellular.md).
 
 The GUI remembers the last successfully opened firmware/model and automatically
 loads and runs it on subsequent launches. **Emulation -> Battery** (XEDK1) offers

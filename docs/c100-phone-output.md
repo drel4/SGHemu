@@ -26,10 +26,10 @@ execution is silent unless a diagnostic capture is requested.
 Model declaration:
 
 ```
-phone_io=0x012af30c,0x012af50e,0x014c6440,0x011465aa,5,3,6
+phone_tones=0x012af30c,0x012af50e,0x014c6440
 ```
 
-This specifies start, stop, table, GPIO write entry and R/G/B GPIO indices.
+This specifies the remaining firmware-specific tone start, stop and table.
 Do not copy these addresses to another firmware without verifying them.
 
 Regression: a read-only XEDK1 boot, Menu/Down/Down/Up/Back generated five native
@@ -43,9 +43,22 @@ rejects device regions, so fast array-mode ROM needs a separate read-only lookup
 
 `control_alert_led` (`011ED550`) drives GPIO 5, 3 and 6.
 The native factory LED-test callback (`011BECA6`) explicitly labels these as
-Red, Green and Blue, confirming the channel order. GPIO writes are observed at
-`uhGPIOWrite` (`011465AA`); native random-color selection, combinations and
-blink timers continue to execute in the firmware.
+Red, Green and Blue, confirming the channel order. GPIO writes were originally
+observed at `uhGPIOWrite` (`011465AA`); native color selection, combinations and
+blink timers continue to execute in the firmware. The shipped profile no longer
+observes that function entry: LED state comes from masked data-port writes at
+`0004028C`, so direct writes and other firmware implementations work too:
+
+```
+gpio_port=0x0004028c,0
+gpio_led=0x0004028c,5,3,6
+```
+
+The three numbers are physical R/G/B port bits, not firmware table addresses.
+Unrelated port bits do not change LED event ordering. A repeated LED write still
+updates its event timestamp, so it can supersede an older MA melody event.
+The legacy seven-field `phone_io` config remains supported for private profiles;
+its GPIO function observer is disabled when physical LED wiring is configured.
 
 MA melody LED events are separate from direct GPIO service-light control.
 The firmware uses chip type 2 and emits MA-3 parameter `0146` with a one-bit

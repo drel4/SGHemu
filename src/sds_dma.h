@@ -17,8 +17,10 @@
    loopback probe needs this block. */
 #define SDS_DMA_MAX_CHANNELS 8
 #define SDS_DMA_CHANNEL_STRIDE 0x40u
+typedef struct SdsDma SdsDma;
 typedef struct {
     Bus *bus;
+    SdsDma *owner;
     uint32_t base;
     int running, started;
     uint16_t control, status;
@@ -26,7 +28,7 @@ typedef struct {
     uint32_t cur_src, cur_dst;
     uint64_t next_due, bytes;
 } SdsDmaChannel;
-typedef struct {
+struct SdsDma {
     Bus *bus;
     SdsUart *serial;      /* port whose RX register paces a device->memory channel */
     uint32_t serial_rx;   /* its data register address, 0 when no port is attached */
@@ -34,8 +36,9 @@ typedef struct {
     unsigned channels, registered;
     uint32_t start_delay, byte_time; /* programmable pacing, CPU cycles */
     uint64_t transfers;
+    uint64_t next_event; /* earliest channel deadline; MMIO writes invalidate it */
     int attached;
-} SdsDma;
+};
 /* The port is optional: a controller with no port still models the register
    block, it just cannot tell when a receive byte is waiting. start_delay/byte_time
    of 0 select the default pacing. */

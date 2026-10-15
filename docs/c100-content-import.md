@@ -48,8 +48,56 @@ the native **Installed** confirmation before closing the dialog or resetting.
 The filesystem manager's **Java games** button reloads saved NVM and opens the
 native installed-MIDlet menu; CLI equivalent: `--java-menu`. The ordinary
 handset keypad route is WAP & Games -> Downloads -> Games and more (7.3.1).
-Bare `--import GAME.jar` allows 900 million instructions; `--java-menu` allows
+Bare `--import GAME.jar` allows 1.8 billion instructions; `--java-menu` allows
 600 million. These are diagnostic execution budgets, not measured CPU clocks.
+
+### Larger packages and native working-buffer overflow (2026-10-14)
+
+The supplied Stalker2D 1.1.0 (Qplaze, 100,841-byte JAR) and MobileAgent 2.1.8
+(@mail.ru, 120,638-byte JAR) both pass CLDC 1.0 / MIDP 1.0 package preparation.
+The native installer can nevertheless show **Installed** without adding a suite.
+This was reproduced on scratch copies of the current saved NVM, including a cold
+reboot and inspection of the native menu. Package filename/model labels were not
+used to reject either file.
+
+Tracing XEDK1 `writeL` (`011246A8`) found Stalker2D compilation filling the
+compiled-object working buffer: a subsequent 4,096-byte write returns `FFFFFFFF`.
+`getBufSize` (`01123C78`) declares 102,400 / 81,920 / 122,880 bytes for handles
+0 / 1 / 2, and 5,120 bytes for the other handles. The 100,841-byte ZIP size is
+therefore not the size of its compiled representation. Increasing the execution
+budget alone does not fix this failure.
+
+An **optional**, default-off compatibility extension is available from Emulation
+or CLI `--extended-java`. Model configuration `java_buffers` declares the verified
+get/set helpers, native table, reserved emulator-only address and per-buffer size:
+
+```
+java_buffers=0x01123c78,0x01123cf8,0x00540f98,0x00800000,0x100000
+```
+
+It intercepts only `getBufSize` / `setFileBuf` for handles 0..2, giving each a
+separate zeroed 1 MiB buffer. Small-file handles, the native compiler, file writer,
+suite registry and VM are untouched. Extra memory is mapped lazily and never
+written into the user's ROM files. This is not a hardware-accuracy claim. Enable
+it **before reimporting**; keep it enabled when running the larger installed apps.
+
+Release-build verification (private scratch NVM only):
+
+* Stalker2D reaches Installed, then Saved on closing; a cold boot lists it
+  alongside Bowling and MIDP Man. Launch currently reports a native
+  `java.io.IOException` while preparing the MIDlet; gameplay is not verified.
+* MobileAgent installs through the production CLI `--extended-java --import`
+  path and persists in the native menu after reboot. Launch reports native
+  `java.lang.ClassFormatError: class format error in Midlet`. Its 35 class files
+  have version 47.0, while Stalker2D's 27 classes and Bobby Carrot's four have
+  version 45.3. The supplied archives are never rewritten to hide these errors.
+
+These tests fix/verify missing installed entries, not universal MIDP execution.
+
+Java injected calls also now return to a private `FFFF0000` sentinel, rather than
+the RTOS idle entry. An unrelated task visiting idle cannot advance the import
+state machine. The filesystem status now retains the installation instructions
+instead of immediately replacing them with the ordinary directory summary.
 
 ### Real package regression
 
@@ -489,3 +537,19 @@ saved `brian` entry. Up selected `No wallpaper`, not the last imported picture.
 The correct regression route was Menu -> Phone settings -> My settings ->
 Wallpaper -> Down twice -> OK, selecting `border128`. Probe routes must inspect
 the current selection rather than assume a fixed initial index.
+
+## Bulk import window
+
+**File -> Phone filesystem...** uses two panes: an import list on the left and
+the phone's native records on the right. Add multiple files or drag/drop them,
+then choose **Import queue >>**. Queued imports run sequentially, with a fresh
+boot for each item and an automatic NVM save after the native record commits.
+**Stop** leaves the current write running and keeps pending files queued.
+Removal and a new import are disabled while a native write is committing.
+The right pane normally shows user media and Java records; **Show system
+records** exposes the complete low-level directory. Names are firmware storage
+names, not a synthetic host filesystem. Java execution compatibility remains
+separate from installation, as documented above.
+
+A two-picture GUI queue was tested through the native importer: both entries
+reached Imported, appeared in the right pane, and were saved in scratch NVM.

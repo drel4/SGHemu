@@ -2,6 +2,7 @@
 #define SGH_BUS_H
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #define BUS_MAX_REGIONS 32
 #define BUS_PAGE_SHIFT 16
 #define BUS_MAX_WATCH 8
@@ -32,6 +33,7 @@ typedef struct {
     unsigned last_width;
     int last_write;
     int pages_ready; /* page[] is rebuilt lazily after regions change */
+    uint32_t map_generation;
     uint8_t page[1u << (32 - BUS_PAGE_SHIFT)]; /* region index + 1 when one region owns the whole 64 KiB page */
 } Bus;
 /* Diagnostics only: arm the watch from "start,end[;start,end...]". Keeps the
@@ -41,6 +43,21 @@ unsigned bus_watch_parse(Bus *b, const char *spec);
 int bus_map(Bus *b, uint32_t base, uint32_t size, uint8_t *data, int readonly, int owned);
 int bus_device(Bus *b, uint32_t base, uint32_t size, PeripheralRead read, PeripheralWrite write, void *ctx);
 uint32_t bus_read(Bus *b, uint32_t address, unsigned width);
+typedef struct {Region *region;uint32_t generation;Bus *owner;} BusFetchHint;
+Region *bus_fetch_region(Bus *b,uint32_t address,unsigned width,BusFetchHint *hint);
+/* Always read live bytes. Never bypass device modes, fault handling or watches. */
+static inline uint32_t bus_fetch(Bus *b,uint32_t address,unsigned width,BusFetchHint *hint)
+{
+    Region *r=hint->region;uint32_t value=0,offset;
+    if(width!=2&&width!=4)return bus_read(b,address,width);
+    if(!r||hint->owner!=b||hint->generation!=b->map_generation||r->size<width||address-r->base>r->size-width)
+        r=bus_fetch_region(b,address,width,hint);
+    if(!r||b->access_log||(r->read&&!r->fast))return bus_read(b,address,width);
+    offset=address-r->base;
+    if(width==4)memcpy(&value,r->data+offset,4);
+    else {uint16_t half;memcpy(&half,r->data+offset,2);value=half;}
+    return value;
+}
 void bus_write(Bus *b, uint32_t address, unsigned width, uint32_t value);
 /* Diagnostics only: read mapped memory without faulting, logging, or touching a
    device callback. Returns 0 when no plain readable memory covers the access. */

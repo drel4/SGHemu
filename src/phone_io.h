@@ -8,10 +8,12 @@ typedef struct {
     double phase[2],step[2],amplitude[2],render_amplitude[2];
     uint64_t led_tick,last_ns,fraction,frames,nonzero,tone_changes,led_changes;
     PhoneOutput *output;
-    int configured,mixed;
+    int configured,mixed,hardware_led;
 } PhoneIo;
 /* Observe verified guest driver entries without replacing their execution. */
 void phone_io_observe(PhoneIo *io,Arm7 *cpu);
+/* Hardware data-port callback; pin numbers are board wiring, not guest PCs. */
+void phone_io_gpio_write(void *context,unsigned mask,unsigned value,uint64_t ticks);
 int phone_io_open(PhoneIo *io,int speakers,const char *wav);
 void phone_io_pause(PhoneIo *io,int paused);
 void phone_io_mix(void *context,int16_t *left,int16_t *right,unsigned frames);

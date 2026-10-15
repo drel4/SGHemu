@@ -6,11 +6,12 @@ static uint8_t memory[65536];
 static Bus bus;
 static Arm7 cpu;
 static unsigned checks;
+static Arm7Cache *cache;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "%s:%d: %s (PC=%08x opcode=%08x error=%s)\n", __FILE__, __LINE__, #x, cpu.last_pc, cpu.last_opcode, cpu.error ? cpu.error : "none"); exit(1); } } while (0)
 static void setup(void)
 {
     memset(&bus, 0, sizeof(bus)); memset(memory, 0, sizeof(memory));
-    CHECK(bus_map(&bus, 0, sizeof(memory), memory, 0, 0)); arm7_reset(&cpu, &bus, 0);
+    CHECK(bus_map(&bus, 0, sizeof(memory), memory, 0, 0)); arm7_reset(&cpu, &bus, 0);cpu.cache=cache;
 }
 static void word(uint32_t at, uint32_t op) { bus_write(&bus, at, 4, op); }
 static void half(uint32_t at, uint32_t op) { bus_write(&bus, at, 2, op); }
@@ -127,5 +128,8 @@ static void clock_timing(void)
 int main(void)
 {
     arithmetic(); memory_ops(); control_and_banks(); thumb_programs(); faults();clock_timing();
+    cache=arm7_cache_create();CHECK(cache);
+    arithmetic(); memory_ops(); control_and_banks(); thumb_programs(); faults();clock_timing();
+    arm7_cache_destroy(cache);cache=NULL;cpu.cache=NULL;
     printf("ARM7TDMI: %u checks passed (instruction programs, flags, memory, banks, IRQ/FIQ, interworking).\n", checks); return 0;
 }

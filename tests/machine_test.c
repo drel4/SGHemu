@@ -16,6 +16,33 @@ static void fixture(int identity, int overlap)
     if (overlap) fputs("ram=0x400080,0x100\n", f);
     CHECK(fclose(f) == 0);
 }
+typedef struct {unsigned calls;uint64_t last;} AudioProbe;
+static void advance_probe(Audio *a,uint64_t ticks)
+{AudioProbe *p=a->state;++p->calls;p->last=ticks;}
+static void clock_equivalence(void)
+{
+    static const uint16_t program[]={0x6801,0x3101,0x6001,0x4209,0x2207,0x4349,0xe7f8};
+    static const uint32_t edge[]={1,3,3900000,23400000,2147483648u,2147483649u,4000000000u,UINT32_MAX};
+    Machine *m=calloc(1,sizeof(*m));uint32_t random=0xc100805;unsigned i,j;
+    CHECK(m);fixture(0,0);CHECK(machine_load(m,"build/machine-fixture.cfg",NULL,NULL));
+    memcpy(m->bus.regions[0].data,program,sizeof(program));m->cpu.cpsr|=ARM_T;m->cpu.r[0]=0x400000;
+    m->clock.attached=1;
+    for(i=0;i<64;++i){uint64_t expected_ns=0,fraction;uint32_t hz;
+        random=random*1664525u+1013904223u;hz=i<8?edge[i]:random|1u;
+        m->clock.arm_hz=hz;m->clock.clock_cycles=m->cpu.clock_cycles;
+        m->clock.nanoseconds=0;m->clock.fraction=fraction=hz-1u;
+        for(j=0;j<512;++j){uint64_t before=m->cpu.clock_cycles,scaled;
+            CHECK(machine_step(m,0));scaled=(m->cpu.clock_cycles-before)*1000000000u+fraction;
+            expected_ns+=scaled/hz;fraction=scaled%hz;
+            CHECK(m->clock.nanoseconds==expected_ns&&m->clock.fraction==fraction);
+        }
+    }
+    {Audio saved=m->audio;AudioProbe p={0};const AudioOps ops={NULL,NULL,NULL,advance_probe};
+      m->audio.ops=&ops;m->audio.state=&p;
+      for(i=0;i<3;++i)CHECK(machine_step(m,0));
+      CHECK(p.calls==3&&p.last==m->cpu.cycles);m->audio=saved;}
+    machine_destroy(m);free(m);
+}
 int main(void)
 {
     Machine m = {0};
@@ -77,8 +104,11 @@ int main(void)
         CHECK(machine_step(&m, 0)); CHECK(m.cpu.instructions == 1 && m.cpu.r[15] == 4 && !m.cpu.irq);
         CHECK(m.intc.pending == 8); /* Critical section must not discard the source. */
         bus_write(&m.bus, 0x40902, 2, 0x80);
-        CHECK(machine_step(&m, 0)); CHECK(m.cpu.instructions == 1 && m.cpu.r[15] == 0x18);
-        CHECK((m.cpu.cpsr & 31) == 0x12 && m.cpu.r[14] == 8 && m.intc.pending == 8);
+        m.cellular.stage=4; /* Native HLE is in flight; keep IRQ latched. */
+        CHECK(machine_step(&m,0));CHECK(m.cpu.instructions==2&&m.cpu.r[15]==8&&!m.cpu.irq);
+        CHECK(m.intc.pending==8);m.cellular.stage=0;
+        CHECK(machine_step(&m, 0)); CHECK(m.cpu.instructions == 2 && m.cpu.r[15] == 0x18);
+        CHECK((m.cpu.cpsr & 31) == 0x12 && m.cpu.r[14] == 12 && m.intc.pending == 8);
         CHECK(m.bus.faults == 0);
         fixture(1, 0);
         f = fopen("build/machine-fixture.cfg", "a"); CHECK(f != NULL);
@@ -105,5 +135,33 @@ int main(void)
         bus_write(&m.bus,0x40b02,2,0xdead);bus_write(&m.bus,0x40b04,2,15);
         CHECK(m.clock.unknown&&m.clock.arm_hz==3900000);CHECK(m.bus.faults==0);machine_destroy(&m);
     }
+    {
+        FILE *f;uint32_t flags;unsigned i;
+        fixture(0,0);f=fopen("build/machine-fixture.cfg","a");CHECK(f!=NULL);
+        fputs("ram=0x400100,0x300\njava_buffers=0x1000000,0x1000002,0x400100,0x8000000,0x40000\n",f);
+        CHECK(!fclose(f));CHECK(machine_load(&m,"build/machine-fixture.cfg",NULL,NULL));
+        CHECK(!m.java_extended&&!m.java_buffer_data);
+        m.cpu.cpsr|=ARM_T;m.cpu.r[15]=m.java_buffer_get;
+        CHECK(machine_step(&m,0)&&!m.java_buffer_data); /* Off really executes ROM. */
+        m.java_extended=1;flags=m.cpu.cpsr;
+        for(i=0;i<3;++i){
+            m.cpu.r[0]=i;m.cpu.r[14]=0x1000011;m.cpu.r[15]=m.java_buffer_get;
+            CHECK(machine_step(&m,0));CHECK(m.cpu.r[0]==0x40000&&m.cpu.r[15]==0x1000010);
+            CHECK(m.cpu.cpsr==flags&&m.java_buffer_data);
+            m.java_buffer_data[i*0x40000]=0x55;m.java_buffer_data[(i+1)*0x40000-1]=0xaa;
+            m.cpu.r[0]=i;m.cpu.r[15]=m.java_buffer_set;CHECK(machine_step(&m,0));
+            CHECK(m.cpu.r[0]==1&&m.cpu.r[15]==0x1000010&&m.cpu.cpsr==flags);
+            CHECK(bus_read(&m.bus,m.java_buffer_table+i*0x98+0x94,4)==0x8000000+i*0x40000);
+            CHECK(!m.java_buffer_data[i*0x40000]&&!m.java_buffer_data[(i+1)*0x40000-1]);
+        }
+        m.cpu.r[0]=3;m.cpu.r[15]=m.java_buffer_get;CHECK(machine_step(&m,0));
+        CHECK(m.cpu.r[15]==m.java_buffer_get+2); /* Small native handles untouched. */
+        machine_destroy(&m);CHECK(!m.java_buffer_data);
+        fixture(0,0);f=fopen("build/machine-fixture.cfg","a");CHECK(f!=NULL);
+        fputs("java_buffers=0x1000000,0x1000002,0x400000,0x400000,0x100000\n",f);
+        CHECK(!fclose(f));CHECK(!machine_load(&m,"build/machine-fixture.cfg",NULL,NULL));
+        machine_destroy(&m);
+    }
+    clock_equivalence();
     printf("Machine/frontend backend: %u checks passed.\n", checks); return 0;
 }

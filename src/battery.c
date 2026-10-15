@@ -7,14 +7,25 @@ static void restore(Battery *b,Arm7 *c)
 void battery_set(Battery *b,unsigned percent,int charging)
 {
     if(percent>100)percent=100;
-    if(b->percent!=percent)b->level_pending=1;
-    if(b->charging!=(unsigned)!!charging)b->cable_pending=1;
+    if(b->adc){
+        unsigned raw=b->adc_empty+((b->adc_full-b->adc_empty)*percent+50u)/100u;
+        dsp_mailbox_inputs(b->adc,raw,b->adc_temperature);b->level_pending=0;
+    }else if(b->percent!=percent)b->level_pending=1;
+    if(b->charger_port){
+        gpio_port_input(b->charger_port,b->charger_bit,!charging);
+        /* The cable input is active-low. Latch transitions in the hardware
+           controller; native firmware performs debounce and notification. */
+        if(b->charging!=(unsigned)!!charging){
+            b->charger_intc->pending|=1u<<b->charger_irq;++b->charger_intc->events;
+        }
+        b->cable_pending=0;
+    }else if(b->charging!=(unsigned)!!charging)b->cable_pending=1;
     b->percent=percent;b->charging=(unsigned)!!charging;
 }
 int battery_gpio(Battery *b,Arm7 *c)
 {
     uint32_t pin;
-    if(!b->enabled||c->r[15]!=b->gpio||!(c->cpsr&ARM_T)||
+    if(b->charger_port||!b->enabled||c->r[15]!=b->gpio||!(c->cpsr&ARM_T)||
        !bus_peek(c->bus,b->pin,1,&pin)||c->r[0]!=pin)return 0;
     /* Verified active-low TA detection. Only this GPIO query is intercepted. */
     c->last_pc=c->r[15];c->last_opcode=0;c->bus->pc=c->last_pc;c->bus->ticks=c->cycles;
@@ -25,7 +36,7 @@ int battery_gpio(Battery *b,Arm7 *c)
 int battery_step(Battery *b,Arm7 *c)
 {
     /* A dedicated return address cannot be confused with an RTOS idle visit. */
-    if(!b->enabled||c->instructions<300000000||
+    if(b->adc||!b->enabled||c->instructions<300000000||
        c->r[15]!=(b->stage?0xffff0000u:b->ready))return 1;
     if(!(c->cpsr&ARM_T))return 0;
     switch(b->stage){

@@ -34,7 +34,7 @@ static int table_word(Bus *bus,uint32_t address,uint32_t *value)
 }
 void phone_io_observe(PhoneIo *io,Arm7 *c){unsigned i;uint32_t note[2],v,a;
     if(!io->configured||!(c->cpsr&ARM_T))return;
-    if(c->r[15]==io->gpio_entry&&c->r[1]<=1){
+    if(!io->hardware_led&&c->r[15]==io->gpio_entry&&c->r[1]<=1){
         for(i=0;i<3;++i)if(c->r[0]==io->led_pins[i]){unsigned old=io->led;
             io->led_tick=c->bus->ticks;
             io->led=(io->led&~(1u<<i))|(c->r[1]<<i);if(old!=io->led)++io->led_changes;}return;
@@ -52,6 +52,14 @@ void phone_io_observe(PhoneIo *io,Arm7 *c){unsigned i;uint32_t note[2],v,a;
         io->amplitude[i]=(double)(int16_t)a*4.0;
     }
     ++io->tone_changes;
+}
+void phone_io_gpio_write(void *context,unsigned mask,unsigned value,uint64_t ticks)
+{
+    PhoneIo *io=context;unsigned i,relevant=0,state=0;
+    for(i=0;i<3;++i){unsigned pin=1u<<io->led_pins[i];
+        relevant|=pin;if(value&pin)state|=1u<<i;}
+    if(!(mask&relevant))return;
+    io->led_tick=ticks;if(io->led!=state)++io->led_changes;io->led=state;
 }
 int phone_io_open(PhoneIo *io,int speakers,const char *wav){PhoneOutput *o;WAVEFORMATEX fmt={0};
     if(!io->configured)return 1;phone_io_close(io);o=calloc(1,sizeof(*o));if(!o)return 0;io->output=o;

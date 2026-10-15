@@ -162,6 +162,29 @@ int main(void)
         CHECK(sound.size==12&&!memcmp(sound.file,odd,sizeof(odd))&&sound.file[11]==0);
         content_import_release(&sound);
     }
+    /* A different RTOS task reaching idle is not an allocator return. */
+    {
+        Machine j={0};ContentImport ji={0};unsigned phase;
+        CHECK(bus_map(&j.bus,RAM_BASE,RAM_SIZE,ram,0,0));boot_cpu(&j);
+        j.java_ready=0x2100;j.import_alloc=0x2000;j.java_set_jar=0x2020;
+        j.java_send_ui=0x2010;j.java_globals=0x3804;j.java_message=0x610;
+        ji.type=10;ji.active=1;ji.trigger=j.java_ready;ji.alloc=j.import_alloc;
+        ji.file=malloc(4);ji.jad=malloc(8);CHECK(ji.file&&ji.jad);
+        memcpy(ji.file,"JAR!",4);strcpy(ji.jad,"JAD");ji.size=4;
+        CHECK(content_import_step(&ji,&j)==1&&ji.stage==1);
+        CHECK(j.cpu.r[14]==0xffff0001u);
+        for(phase=1;phase<=5;++phase){
+            j.cpu.r[15]=ji.trigger;j.cpu.r[0]=0;
+            CHECK(content_import_step(&ji,&j)==1&&(unsigned)ji.stage==phase&&!ji.failed);
+            j.cpu.r[15]=0xffff0000u;j.cpu.r[0]=0x3000+(phase-1)*0x100;
+            CHECK(content_import_step(&ji,&j)==(phase==5?2:1));
+            if(phase<5)CHECK(j.cpu.r[14]==0xffff0001u);
+        }
+        CHECK(ji.done&&j.cpu.r[15]==ji.trigger);
+        CHECK(bus_read(&j.bus,0x3000,4)==0x2152414au);
+        CHECK(bus_read(&j.bus,j.java_globals+4,4)==0x3100);
+        content_import_release(&ji);bus_destroy(&j.bus);
+    }
     printf("Content import: %u checks passed.\n", checks);
     return 0;
 }

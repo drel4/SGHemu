@@ -43,6 +43,7 @@ static int add(Bus *b, uint32_t base, uint32_t size)
 {
     unsigned i;
     b->pages_ready = 0;
+    ++b->map_generation;
     if (!size || (uint64_t)base + size > UINT64_C(0x100000000) || b->count == BUS_MAX_REGIONS) return 0;
     for (i = 0; i < b->count; ++i) {
         Region *r = &b->regions[i];
@@ -128,6 +129,10 @@ uint32_t bus_read(Bus *b, uint32_t a, unsigned width)
     if (b->access_log) watch(b, 'R', a, width, value, r);
     return value;
 }
+Region *bus_fetch_region(Bus *b,uint32_t a,unsigned width,BusFetchHint *hint)
+{
+    hint->region=lookup(b,a,width);hint->generation=b->map_generation;hint->owner=b;return hint->region;
+}
 int bus_peek(Bus *b, uint32_t a, unsigned width, uint32_t *value)
 {
     Region *r = lookup(b, a, width);
@@ -158,5 +163,5 @@ void bus_destroy(Bus *b)
 {
     unsigned i;
     for (i = 0; i < b->count; ++i) if (b->regions[i].owned) free(b->regions[i].data);
-    b->count = 0; b->pages_ready = 0;
+    b->count = 0; b->pages_ready = 0;++b->map_generation;
 }
