@@ -342,6 +342,11 @@ static void update_diagnostics(void)
         (unsigned long long)app.m.cellular.received_sms,(unsigned long long)app.m.cellular.sent_sms,app.m.cellular.last_sms_number,
         app.m.network.mode,(unsigned long long)app.m.network.transmitted,(unsigned long long)app.m.network.received,
         *app.m.network.error?app.m.network.error:"no transport error");
+    if(app.m.network.java.first&&length<sizeof(text))length+=(size_t)snprintf(text+length,sizeof(text)-length,
+        "Java TCP: DNS %llu; connects %llu; TX %llu / RX %llu bytes; %s\r\n",
+        (unsigned long long)app.m.network.java.lookups,(unsigned long long)app.m.network.java.connects,
+        (unsigned long long)app.m.network.java.sent,(unsigned long long)app.m.network.java.received,
+        *app.m.network.java.error?app.m.network.java.error:"no DNS error");
     if (length < sizeof(text)) snprintf(text + length, sizeof(text) - length,
         "\r\nSee build/gui-unmapped.log for every unknown access.\r\n"
         "LCD output comes only from guest command/data writes. Keypad scanning/debounce runs in firmware.\r\n"

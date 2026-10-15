@@ -281,6 +281,20 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
             if(!base||(base&1)||m->cellular.alert_request||!number(comma,&size)||size){valid=0;break;}m->cellular.alert_request=base;
         } else if (!strcmp(key,"cellular_poll")) {
             if(!base||(base&1)||m->cellular.poll||!number(comma,&size)||size){valid=0;break;}m->cellular.poll=base;
+        } else if (!strcmp(key,"java_net")) {
+            unsigned j;char *part=comma;
+            if(m->network.java.entry[0]||!base||(base&1)){valid=0;break;}
+            m->network.java.entry[0]=base;
+            for(j=1;j<JN_COUNT;++j){char *next=strchr(part,',');
+                if((j<JN_COUNT-1&&!next)||(j==JN_COUNT-1&&next)){valid=0;break;}if(next)*next++=0;
+                if(!number(part,&m->network.java.entry[j])||!m->network.java.entry[j]||(m->network.java.entry[j]&1)){valid=0;break;}
+                part=next;
+            }
+            if(!valid)break;
+            m->network.java.first=UINT32_MAX;
+            for(j=0;j<JN_COUNT;++j)if(j!=JN_NOTIFY){uint32_t pc=m->network.java.entry[j];
+                if(pc<m->network.java.first)m->network.java.first=pc;
+                if(pc>m->network.java.last)m->network.java.last=pc;}
         } else if (!strcmp(key,"wap")) {
             uint32_t fields[7];unsigned j;char *part=comma;
             if(m->network.txn_start||!base||(base&1)){valid=0;break;}
@@ -503,6 +517,15 @@ int machine_load_pair(Machine *m, const char *path, const char *rom_override,
     if(valid){unsigned i,j;for(i=0;i<m->register_count;++i)if(m->registers[i].irom_vector){
         for(j=0;j<m->irom.count;++j)if(m->irom.services[j].address==(m->registers[i].value&~1u))break;
         if(j==m->irom.count)valid=0;}}
+    if(valid&&m->network.java.first){unsigned i,j;
+        if(!m->cellular.ready||!m->cellular.poll)valid=0;
+        for(i=0;i<JN_COUNT;++i){int found=0;uint32_t pc=m->network.java.entry[i];
+            for(j=0;j<i;++j)if(pc==m->network.java.entry[j])valid=0;
+            for(j=0;j<m->rom_count;++j)if(pc>=m->roms[j].base&&
+                (uint64_t)pc+2<=(uint64_t)m->roms[j].base+m->roms[j].size)found=1;
+            if(!found)valid=0;
+        }
+    }
     if(valid&&(m->cellular.ready||m->cellular.sms_send||m->network.txn_start||m->cellular.poll)){
         unsigned i,j;uint32_t code[]={m->cellular.ready,m->cellular.alloc,m->cellular.release,
             m->cellular.send_ui,m->cellular.dial,m->cellular.accept,m->cellular.disconnect,
@@ -631,7 +654,8 @@ int machine_step(Machine *m, int continuation)
                 m->cellular.boot_ready=1;break;
             }
         }
-        if(!m->cellular.stage)phone_net_advance(&m->network,&m->cellular);
+        if(!m->cellular.stage){phone_net_advance(&m->network,&m->cellular);
+            java_net_advance(&m->network.java,&m->cellular,&m->cpu,m->network.mode&&m->cellular.enabled);}
         if(!cellular_advance(&m->cellular,&m->cpu,m->guest_busy||m->battery.stage,m->sim.present)){
             m->cpu.error=m->cellular.error;m->cpu.halted=1;return 0;
         }
@@ -664,8 +688,9 @@ int machine_step(Machine *m, int continuation)
         {
             uint32_t pc=m->cpu.r[15];PhoneNetwork *n=&m->network;Cellular *s=&m->cellular;
             /* Keep packet/event stack frames off the interpreter's normal path. */
-            if((m->cpu.cpsr&ARM_T)&&n->txn_start&&
-                (pc==n->txn_start||pc==n->send_pdu||pc==n->recv_pdu||pc==n->bearer_state||pc==n->post_event))
+            if((m->cpu.cpsr&ARM_T)&&((n->txn_start&&
+                (pc==n->txn_start||pc==n->send_pdu||pc==n->recv_pdu||pc==n->bearer_state||pc==n->post_event))||
+                java_net_may_call(&n->java,pc)))
                 hle=phone_net_hle(n,s,&m->cpu);
             if(!hle&&(m->cpu.cpsr&ARM_T)&&s->enabled&&s->ready&&
                 (pc==s->radio_select||pc==s->name_lookup||pc==s->dial||pc==s->accept||
@@ -701,6 +726,7 @@ unsigned machine_run(Machine *m,unsigned count,int continuation)
        collisions merely take the reference path; they cannot miss a hook. */
     for(i=0;i<sizeof(hooks)/sizeof(hooks[0]);++i)run_stop(stops,hooks[i]);
     for(i=0;i<m->irom.count;++i)run_stop(stops,m->irom.services[i].address);
+    for(i=0;i<JN_COUNT;++i)run_stop(stops,m->network.java.entry[i]);
     while(done<count){uint32_t epoch=m->bus.device_epoch;uint64_t ns_due=UINT64_MAX,cycle_due=UINT64_MAX;
         if(!machine_step(m,continuation))return done;++done;
         if(epoch!=m->bus.device_epoch||m->cellular.stage||m->battery.stage||m->guest_busy||

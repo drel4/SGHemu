@@ -17,6 +17,27 @@ static void fixture(int identity, int overlap)
     CHECK(fclose(f) == 0);
 }
 typedef struct {unsigned calls;uint64_t last;} AudioProbe;
+static void java_network_config(void)
+{
+    Machine *m=calloc(1,sizeof(*m));unsigned variant,i;FILE *f;
+    CHECK(m);
+    for(variant=0;variant<7;++variant){
+        fixture(0,0);f=fopen("build/machine-fixture.cfg","a");CHECK(f);
+        if(variant!=6)fputs("cellular=0x100001e,0x100001e,0x100001e,0x100001e,0x100001e,0x100001e,0x100001e,0x100001e,0x400000\ncellular_poll=0x100001e,0\n",f);
+        fputs("java_net=",f);
+        for(i=0;i<JN_COUNT-(variant==1?1u:0u);++i){uint32_t pc=0x1000000+i*2;
+            if(i==JN_BIND){if(variant==3)++pc;if(variant==4)pc=0x2000000;if(variant==5)pc=0x1000000;}
+            fprintf(f,"%s0x%x",i?",":"",pc);
+        }
+        if(variant==2)fputs(",0x100001e",f);fputs("\n",f);CHECK(!fclose(f));
+        CHECK(machine_load(m,"build/machine-fixture.cfg",NULL,NULL)==(variant==0));
+        if(!variant){CHECK(m->network.java.first==0x1000000&&m->network.java.last==0x100001c);
+            m->cpu.cpsr|=ARM_T;m->cpu.r[15]=m->network.java.entry[JN_AVAILABLE];
+            m->cpu.r[0]=999;m->cpu.r[1]=0x400000;m->cpu.r[14]=0x100001d;
+            CHECK(machine_step(m,0)&&m->cpu.r[0]==UINT32_MAX&&bus_read(&m->bus,0x400000,2)==0x78);}
+        machine_destroy(m);
+    }free(m);
+}
 static void advance_probe(Audio *a,uint64_t ticks)
 {AudioProbe *p=a->state;++p->calls;p->last=ticks;}
 static void clock_equivalence(void)
@@ -176,6 +197,6 @@ int main(void)
         fputs("irom_service=0x8077c,memcpy\nirom_vector=0x8003c,0x8077c\n",f);CHECK(!fclose(f));
         CHECK(!machine_load(&m,"build/machine-fixture.cfg",NULL,NULL)); /* not Thumb */
     }
-    clock_equivalence();
+    clock_equivalence();java_network_config();
     printf("Machine/frontend backend: %u checks passed.\n", checks); return 0;
 }

@@ -33,6 +33,9 @@ Addresses below are even Thumb entry PCs or data addresses, as in the configs.
 | TGSetToneD1 | `012AE604` | `012AF268` | `012AF30C` |
 | TGSleepD1 | `012AE806` | `012AF46A` | `012AF50E` |
 | ToneTable | `014C40C8` | `014C63FC` | `014C6440` |
+| Java Netopen | `01166B94` | `01166CFC` | `01166CA8` |
+| Java DSGetHostByName | `01159472` | `0115955A` | `01159506` |
+| Java OnAsyncNetworkEvent | `0112620C` | `0112620C` | `011261E8` |
 
 Entry points were compared against the locally supplied XEDK1 linker symbols
 and disassembly. Matching accounts for relocated BL targets, PC-relative literal
@@ -45,6 +48,10 @@ and exercised through the native incoming-message path.
 The profiles also contain relocated media/Java import and WAP bindings. Native
 Java application compatibility remains dependent on the game and handset;
 adding these bindings is not evidence that arbitrary MIDP games work.
+The [Java DNS/TCP bridge](java-network.md) also has separate bindings for each
+version. XEDK1 passed a native network installation; XEDA2/XEDD1 bindings were
+disassembly-checked and the updated profiles boot-tested, but their full native
+network installation remains unverified.
 
 ## Reproducible integration check
 

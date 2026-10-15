@@ -78,7 +78,7 @@ failed:
 }
 void phone_net_close(PhoneNetwork *network)
 {
-    PhoneNet *n=network->runtime;unsigned i;if(!n)return;SetEvent(n->stop);wap_http_cancel(&n->http);
+    PhoneNet *n=network->runtime;unsigned i;java_net_close(&network->java);if(!n)return;SetEvent(n->stop);wap_http_cancel(&n->http);
     WaitForSingleObject(n->thread,INFINITE);CloseHandle(n->thread);
     for(i=0;i<2;++i){closesocket(n->sockets[i]);wap_gateway_close(&n->gateway[i]);}
     CloseHandle(n->stop);CloseHandle(n->work);DeleteCriticalSection(&n->lock);free(n);network->runtime=NULL;
@@ -135,6 +135,7 @@ static void retain_url(PhoneNetwork *n,Cellular *cell,Arm7 *c)
 int phone_net_hle(PhoneNetwork *n,Cellular *cell,Arm7 *c)
 {
     uint32_t pc=c->r[15];unsigned channel=c->r[0];PhoneNet *r=n->runtime;
+    if(java_net_may_call(&n->java,pc)&&java_net_hle(&n->java,cell,c,n->mode&&cell->enabled))return 1;
     if(!n->txn_start||!(c->cpsr&ARM_T))return 0;
     /* The URL scene's edit buffer is cleared while its deferred event is still
        pending during virtual bearer setup. Give that event stable guest-owned

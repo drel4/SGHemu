@@ -255,8 +255,10 @@ gateway** (packet data only). Selecting the built-in gateway shows setup
 instructions: gateway IP **10.0.0.1**, non-secure WAP, port **9201**; test homepage
 **http://sghemu.local/**. Configure these in the phone's WAP browser profile.
 The C gateway uses Windows HTTP/HTTPS fetching and a small text/link conversion
-for old WAP browsers. This is experimental WAP/UDP transport, not complete GSM,
-Java TCP networking, WTLS or a full HTML browser. See
+for old WAP browsers. Java now has a separate asynchronous DNS/TCP bridge for
+native HTTP downloads (including JAD-to-JAR installation) in both internet modes
+on XEDA2/XEDD1/XEDK1. This is not complete GSM, Java UDP, WTLS or a full HTML browser. See
+[Java networking](docs/java-network.md) and
 [cellular and SIM details](docs/c100-cellular.md).
 
 The GUI remembers the last successfully opened firmware/model and automatically

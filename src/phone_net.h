@@ -1,12 +1,14 @@
 #ifndef SGH_PHONE_NET_H
 #define SGH_PHONE_NET_H
 #include "cellular.h"
+#include "java_net.h"
 typedef struct PhoneNet PhoneNet;
 typedef struct {
     uint32_t txn_start,send_pdu,recv_pdu,bearer_state,post_event,data_arrived,wap_base,driver_base;
     PhoneNet *runtime;unsigned mode,opened[2];uint64_t transmitted,received;
     uint64_t state_queries,start_requests;unsigned last_bearer;
     unsigned url_slot;
+    JavaNetwork java;
     int profiling;uint64_t lock_calls,lock_wait_ticks;
     FILE *trace; /* Optional packet trace; caller owns it, CPU thread only. */
     char error[160];

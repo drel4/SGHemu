@@ -141,8 +141,10 @@ when the small cache fills, so rapid paging does not exhaust transaction slots;
 outstanding transfers are never evicted.
 
 Large responses are bounded; HTML scripting,
-forms/POST, WTLS, push, complete WML semantics and Java TCP networking are not
-implemented. This is a high-level data bridge, not emulated GSM RF/IP hardware.
+forms/POST, WTLS, push and complete WML semantics are not implemented in the WAP
+gateway. Java uses a separate [DNS/TCP bridge](java-network.md), including the
+native JAD/JAR downloader; it does not pass HTTP through the WAP converter.
+This is a high-level data bridge, not emulated GSM RF/IP hardware.
 
 XEDK1 transport bindings (`wap=` in the model config):
 
