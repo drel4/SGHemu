@@ -892,7 +892,13 @@ static void command(unsigned id)
     }
     case ID_CONTINUE: app.continuation = !app.continuation; break;
     case ID_PATTERN: if (app.test_pixels) app.pattern = !app.pattern; InvalidateRect(app.window, &app.lcd, FALSE); break;
-    case ID_ZOOM1: case ID_ZOOM2: case ID_ZOOM3: app.zoom = id - ID_ZOOM1 + 1; fit_window(); break;
+    case ID_ZOOM1: case ID_ZOOM2: case ID_ZOOM3: {
+        char value[2];app.zoom = id - ID_ZOOM1 + 1;
+        value[0]=(char)('0'+app.zoom);value[1]=0;
+        CreateDirectoryA("state",NULL);
+        WritePrivateProfileStringA("look_and_feel","lcd_zoom",value,app.emulator_settings);
+        fit_window();break;
+    }
     case ID_DIAGNOSTICS:
         if (!app.diagnostics) app.diagnostics = CreateWindowExA(0, "SGHemuDiagnostics", "SGHemu - diagnostics", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT, CW_USEDEFAULT, 730, 400, app.window, NULL, GetModuleHandleA(NULL), NULL);
@@ -1211,6 +1217,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     GetFullPathNameA("state/audio.ini",sizeof(app.audio_settings),app.audio_settings,NULL);
     GetFullPathNameA("state/emulator.ini",sizeof(app.emulator_settings),app.emulator_settings,NULL);
     app.ghosting=GetPrivateProfileIntA("look_and_feel","lcd_ghosting",0,app.emulator_settings)!=0;
+    app.zoom=GetPrivateProfileIntA("look_and_feel","lcd_zoom",2,app.emulator_settings);
+    if(app.zoom<1||app.zoom>3)app.zoom=2;
     app.ma_detune=GetPrivateProfileIntA("look_and_feel","c100_ma_detune",0,app.emulator_settings)!=0;
     app.icon_led=~0u;
     app.host_time=GetPrivateProfileIntA("emulation","sync_time",1,app.emulator_settings)!=0;
@@ -1232,7 +1240,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     app.logging=GetPrivateProfileIntA("diagnostics","logging",0,app.emulator_settings)!=0;
     InitCommonControlsEx(&common);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    strcpy(app.model, "models/c100/c100xeda2.cfg"); app.zoom = 2; app.state = "Paused"; app.last_key = SGH_MAX_KEYS;
+    strcpy(app.model, "models/c100/c100xeda2.cfg"); app.state = "Paused"; app.last_key = SGH_MAX_KEYS;
     {
         char recent_model[1024],recent_rom[1024],recent_second[1024];
         GetPrivateProfileStringA("recent_firmware","model","",recent_model,sizeof(recent_model),app.emulator_settings);
