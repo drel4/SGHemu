@@ -95,13 +95,41 @@ records, blank-flash initialization and the reported 300 KB user quota.
 
 ## Build and run
 
+On Windows, use an x86 Visual Studio Developer Command Prompt with native
+Windows GNU Make on `PATH` (for example, MSYS2's `mingw32-make.exe`).
+
 ```powershell
 .\build.cmd release
 .\build\sghemu-gui.exe
 ```
 
-For an optimized x86 build with the C runtime linked statically, run
-`build.cmd release`. Both build modes run the synthetic verification suite.
+`build.cmd` invokes the Makefile and keeps the original `build/` output paths.
+Run `mingw32-make` directly to build the CLI and GUI under `build/windows/`.
+
+On Linux, run these commands from the repository root with GNU Make and a
+C17 compiler. The checks use synthetic data and need no firmware files.
+
+```sh
+make
+make check
+```
+
+To try C100XEDK1, point `--folder` at the directory containing both ROM images:
+
+```sh
+./build/linux/sghemu --folder "/path/to/firmware" 10000000 --no-persist --lcd-out build/lcd.bmp
+```
+
+The CLI matches the images to a model by SHA-256 and saves the LCD frame to
+`build/lcd.bmp`. `--no-persist` skips loading and saving phone state.
+
+The host network bridge, live audio and the Yamaha DLL backend are Windows-only.
+Linux picture import supports uncompressed 24- and 32-bit BMP files.
+
+`make check` runs the synthetic tests; `make tests` also builds the optional
+ROM tests, and `make tools` builds the available command-line tools. The
+Makefile defaults to release; use `CONFIG=debug` for a debug build.
+
 Release ZIPs contain the GUI, CLI, firmware-inspection and standalone audio
 tools, model configs, and documentation. Extract the whole archive and launch
 `build/sghemu-gui.exe`; keep the supplied directory layout. Firmware and Yamaha
@@ -110,7 +138,7 @@ v0.2.1 improves sequencer restart timing and v0.2.2 adds an experimental ADPCM
 stream-cache correction. Instrument compatibility and occasional stutter remain
 under investigation; real-handset tempo and complete stream playback are unverified.
 
-In the GUI use **File > Open firmware folder (Ctrl+O)**. Pick the folder containing
+In the Windows GUI use **File > Open firmware folder (Ctrl+O)**. Pick the folder containing
 both firmware files, or a parent folder containing several sets. Exact SHA-256
 hashes identify the model/version even when files have been renamed. A complete
 match boots automatically; multiple matches offer a version selection. No guessed
@@ -298,6 +326,11 @@ license preserved separately from the project's WTFPL.
 | `tests/` | Instruction programs, protocol fixtures, optional real-ROM regressions |
 | `docs/` | Reverse-engineering evidence and remaining hardware work |
 | `models/**/roms/`, `MA5libs/*.dll`, `build/` | Ignored private inputs/artifacts |
+
+The CLI (`src/main.c`) and Windows GUI (`src/gui.c`) share `src/machine.c`,
+which loads the model and runs the emulated phone. Host file and clock
+operations are declared in `src/port.h` and implemented in `src/port_posix.c`
+or `src/port_win32.c`, selected by the Makefile.
 
 ## License
 

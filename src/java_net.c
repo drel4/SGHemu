@@ -4,7 +4,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <process.h>
-#include "java_net.h"
+#include "java_net_guest.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -99,36 +99,22 @@ void java_net_advance(JavaNetwork *n,Cellular *cell,Arm7 *cpu,int enabled)
         }
     }
 }
-static int memory(Bus *b,uint32_t address,unsigned size,int write)
-{
-    unsigned i;if(!size)return 1;
-    for(i=0;i<b->count;++i){Region *r=&b->regions[i];
-        if(r->data&&!r->read&&(!write||!r->readonly)&&address>=r->base&&
-            (uint64_t)address+size<=(uint64_t)r->base+r->size)return 1;
-    }return 0;
-}
-static int returned(Arm7 *cpu,uint32_t value)
-{
-    uint32_t lr=cpu->r[14];cpu->r[0]=value;cpu->cpsr=(cpu->cpsr&~ARM_T)|((lr&1)?ARM_T:0);
-    cpu->r[15]=lr&((lr&1)?~1u:~3u);++cpu->instructions;++cpu->cycles;return 1;
-}
-static int error_return(Arm7 *cpu,uint32_t error_pointer,unsigned error,uint32_t value)
-{
-    if(error_pointer&&memory(cpu->bus,error_pointer,2,1))bus_write(cpu->bus,error_pointer,2,error);
-    return returned(cpu,value);
-}
 int java_net_hle(JavaNetwork *n,Cellular *cell,Arm7 *c,int enabled)
 {
-    unsigned op,a=c->r[0],b=c->r[1],length=c->r[2];uint32_t err=c->r[3];Stream *s;
+    unsigned op = java_net_operation(n, c);
+    unsigned a = c->r[0], b = c->r[1], length = c->r[2];
+    uint32_t err = c->r[3];
+    Stream *s;
+
     (void)cell;
-    if(!(c->cpsr&ARM_T)||!java_net_may_call(n,c->r[15]))return 0;
-    for(op=0;op<JN_COUNT;++op)if(op!=JN_NOTIFY&&n->entry[op]==c->r[15])break;
-    if(op==JN_COUNT)return 0;
-    if(op==JN_SHUTDOWN){java_net_close(n);return returned(c,0);}
-    if(!enabled||!open_runtime(n)){
-        uint32_t pointer=op==JN_CLOSE||op==JN_AVAILABLE?b:
-            op==JN_SOCKET||op==JN_CONNECT||op==JN_BIND||op==JN_WRITE||op==JN_READ||op==JN_LOOKUP?err:0;
-        return error_return(c,pointer,0x78,UINT32_MAX);}
+    if (op == JN_COUNT)
+        return 0;
+    if (op == JN_SHUTDOWN) {
+        java_net_close(n);
+        return returned(c, 0);
+    }
+    if (!enabled || !open_runtime(n))
+        return java_net_unavailable(c, op);
     if(op==JN_OPEN)return returned(c,0);
     if(op==JN_LOOKUP){JavaNetRuntime *r=n->runtime;unsigned i;char name[256]={0};int terminated=0;
         if(!memory(c->bus,b,16,1)||!memory(c->bus,err,2,1))return error_return(c,err,0x13,UINT32_MAX);

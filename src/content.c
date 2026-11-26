@@ -1,19 +1,42 @@
 #include "content.h"
 #include "file.h"
 #include "jar.h"
+#include "port.h"
+#ifdef _WIN32
 #define COBJMACROS
 #include <windows.h>
 #include <wincodec.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define PICTURE_MAX_DIMENSION 128
+#define PICTURE_HEADER_SIZE 11
+
 static int fail(ContentImport *im, const char *reason)
 {
     snprintf(im->error, sizeof(im->error), "Content import: %s", reason);
     im->failed = 1; return 0;
 }
-/* Draw_Image reads a nine-byte animation header. Its bitmap body includes a
-   two-byte format/palette header before the RGB565 pixels. */
+/* Both host decoders produce the container read by the guest's Draw_Image.
+   The nine-byte animation header declares one frame. Its length includes
+   two zero bytes (raw bitmap, no palette) before the little-endian RGB565 pixels. */
+static uint8_t *picture_buffer(unsigned width, unsigned height, unsigned pixel_bytes)
+{
+    uint8_t *bitmap = calloc(1, PICTURE_HEADER_SIZE + pixel_bytes);
+    unsigned frame_bytes = pixel_bytes + 2;
+
+    if (!bitmap) return NULL;
+    bitmap[0] = (uint8_t)width;
+    bitmap[1] = (uint8_t)height;
+    bitmap[3] = 1;
+    bitmap[5] = (uint8_t)frame_bytes;
+    bitmap[6] = (uint8_t)(frame_bytes >> 8);
+    return bitmap;
+}
+
+#ifdef _WIN32
 static int picture(ContentImport *im)
 {
     IWICImagingFactory *factory=NULL;IWICStream *stream=NULL;
@@ -30,9 +53,9 @@ static int picture(ContentImport *im)
        FAILED(IWICBitmapDecoder_GetFrame(decoder,0,&frame))||
        FAILED(IWICBitmapFrameDecode_GetSize(frame,&w,&h))||!w||!h)goto done;
     source=(IWICBitmapSource *)frame;
-    if(w>128||h>128) {
-        if(w>=h){h=(UINT)((uint64_t)h*128/w);w=128;}
-        else {w=(UINT)((uint64_t)w*128/h);h=128;}
+    if(w>PICTURE_MAX_DIMENSION||h>PICTURE_MAX_DIMENSION) {
+        if(w>=h){h=(UINT)((uint64_t)h*PICTURE_MAX_DIMENSION/w);w=PICTURE_MAX_DIMENSION;}
+        else {w=(UINT)((uint64_t)w*PICTURE_MAX_DIMENSION/h);h=PICTURE_MAX_DIMENSION;}
         if(!w)w=1;if(!h)h=1;
         if(FAILED(IWICImagingFactory_CreateBitmapScaler(factory,&scaler))||
            FAILED(IWICBitmapScaler_Initialize(scaler,source,w,h,WICBitmapInterpolationModeFant)))goto done;
@@ -41,11 +64,12 @@ static int picture(ContentImport *im)
     if(FAILED(IWICImagingFactory_CreateFormatConverter(factory,&converter))||
        FAILED(IWICFormatConverter_Initialize(converter,source,&GUID_WICPixelFormat16bppBGR565,
            WICBitmapDitherTypeNone,NULL,0,WICBitmapPaletteTypeCustom)))goto done;
-    size=w*h*2;bitmap=calloc(1,size+11);if(!bitmap)goto done;
-    bitmap[0]=(uint8_t)w;bitmap[1]=(uint8_t)h;bitmap[3]=1;
-    bitmap[5]=(uint8_t)(size+2);bitmap[6]=(uint8_t)((size+2)>>8);
-    if(FAILED(IWICFormatConverter_CopyPixels(converter,NULL,w*2,size,bitmap+11)))goto done;
-    free(im->file);im->file=bitmap;bitmap=NULL;im->size=size+11;im->type=7;ok=1;
+    size = w * h * 2;
+    bitmap = picture_buffer(w, h, size);
+    if (!bitmap) goto done;
+    if (FAILED(IWICFormatConverter_CopyPixels(converter, NULL, w * 2, size, bitmap + PICTURE_HEADER_SIZE)))
+        goto done;
+    free(im->file);im->file=bitmap;bitmap=NULL;im->size=size+PICTURE_HEADER_SIZE;im->type=7;ok=1;
 done:
     free(bitmap);
     if(converter)IWICFormatConverter_Release(converter);
@@ -57,6 +81,85 @@ done:
     if(SUCCEEDED(init))CoUninitialize();
     return ok?1:fail(im,"cannot decode this picture");
 }
+#else
+/* Decode uncompressed 24- and 32-bit BMP files on Linux. */
+static int picture(ContentImport *im)
+{
+    const uint8_t *bmp = im->file;
+    uint32_t pixel_offset, header_size, width, height, bits_per_pixel, bytes_per_pixel;
+    uint32_t target_width, target_height, pixel_bytes;
+    uint64_t stride;
+    int top_down;
+    uint8_t *bitmap;
+    uint32_t x, y;
+
+    /* Require the 14-byte BMP file header and at least a 40-byte DIB header. */
+    if (im->size < 54 || bmp[0] != 'B' || bmp[1] != 'M')
+        return fail(im, "cannot decode this picture");
+    pixel_offset = le32(bmp + 10);
+    header_size = le32(bmp + 14);
+    width = le32(bmp + 18);
+    height = le32(bmp + 22);
+    bits_per_pixel = bmp[28] | (bmp[29] << 8);
+    if (header_size < 40 || pixel_offset < 54 || pixel_offset > im->size ||
+        header_size > pixel_offset - 14 || !width || width > INT32_MAX || !height ||
+        bmp[26] != 1 || bmp[27] != 0 || (bits_per_pixel != 24 && bits_per_pixel != 32) ||
+        le32(bmp + 30) != 0)
+        return fail(im, "cannot decode this picture");
+    /* A negative height means the file already stores rows top to bottom. */
+    top_down = (height & 0x80000000u) != 0;
+    if (top_down)
+        height = 0u - height;
+    /* Rows are padded to a multiple of four bytes. Check that they all fit without
+       multiplying stride by an untrusted height. */
+    bytes_per_pixel = bits_per_pixel / 8;
+    stride = ((uint64_t)width * bytes_per_pixel + 3u) & ~UINT64_C(3);
+    if (stride > (im->size - pixel_offset) / height)
+        return fail(im, "cannot decode this picture");
+
+    /* Fit the phone's LCD, keeping at least one pixel on each axis. */
+    target_width = width;
+    target_height = height;
+    if (width > PICTURE_MAX_DIMENSION || height > PICTURE_MAX_DIMENSION) {
+        if (width >= height) {
+            target_height = (uint32_t)((uint64_t)height * PICTURE_MAX_DIMENSION / width);
+            target_width = PICTURE_MAX_DIMENSION;
+        } else {
+            target_width = (uint32_t)((uint64_t)width * PICTURE_MAX_DIMENSION / height);
+            target_height = PICTURE_MAX_DIMENSION;
+        }
+        if (!target_width) target_width = 1;
+        if (!target_height) target_height = 1;
+    }
+
+    pixel_bytes = target_width * target_height * 2;
+    bitmap = picture_buffer(target_width, target_height, pixel_bytes);
+    if (!bitmap)
+        return fail(im, "cannot allocate the bitmap buffer");
+
+    /* Pick the source pixel for each output position, dropping BMP alpha. */
+    for (y = 0; y < target_height; ++y) {
+        uint32_t row = (uint32_t)((uint64_t)y * height / target_height);
+        if (!top_down)
+            row = height - 1 - row;
+        for (x = 0; x < target_width; ++x) {
+            uint32_t column = (uint32_t)((uint64_t)x * width / target_width);
+            const uint8_t *pixel = bmp + pixel_offset + row * stride + column * bytes_per_pixel;
+            uint8_t *output = bitmap + PICTURE_HEADER_SIZE + (y * target_width + x) * 2;
+            uint16_t red = pixel[2] >> 3, green = pixel[1] >> 2, blue = pixel[0] >> 3;
+            uint16_t rgb565 = (uint16_t)((red << 11) | (green << 5) | blue);
+            output[0] = (uint8_t)rgb565;
+            output[1] = (uint8_t)(rgb565 >> 8);
+        }
+    }
+
+    free(im->file);
+    im->file = bitmap;
+    im->size = PICTURE_HEADER_SIZE + pixel_bytes;
+    im->type = 7;
+    return 1;
+}
+#endif
 /* NLT slot names are at most 11 bytes plus the terminator. Keep only bytes the
    filesystem uses for its own entries so a host file name cannot smuggle a path
    or control character into the catalog. */
@@ -121,28 +224,44 @@ static void restore_caller(ContentImport *im, Machine *m)
 int content_import_open(ContentImport *im, Machine *m, const char *path)
 {
     size_t n = 0;
-    const char *ext=strrchr(path,'.');
+    const char *ext = strrchr(path, '.');
     memset(im, 0, sizeof(*im));
     if (!m->import_trigger || !m->import_alloc || !m->import_search || !m->import_write)
         return fail(im, "model declares no import guest entries");
-    if(ext&&!_stricmp(ext,".jar")){
-        JarPackage jar={0};
-        if(!m->java_ready)return fail(im,"model declares no Java installer entries");
-        if(!jar_open(&jar,path)){snprintf(im->error,sizeof(im->error),"%s",jar.error);im->failed=1;return 0;}
-        im->file=jar.archive;im->size=(uint32_t)jar.size;im->jad=jar.jad;im->type=10;
-        im->trigger=m->java_ready;im->alloc=m->import_alloc;
-        derive_stem(path,im->stem);strcpy(im->name,im->stem);im->active=1;return 1;
+    if (ext && !plat_stricmp(ext, ".jar")) {
+        JarPackage jar = {0};
+        if (!m->java_ready)
+            return fail(im, "model declares no Java installer entries");
+        if (!jar_open(&jar, path)) {
+            snprintf(im->error, sizeof(im->error), "%s", jar.error);
+            im->failed = 1;
+            return 0;
+        }
+        im->file = jar.archive;
+        im->size = (uint32_t)jar.size;
+        im->jad = jar.jad;
+        im->type = 10;
+        im->trigger = m->java_ready;
+        im->alloc = m->import_alloc;
+        derive_stem(path, im->stem);
+        strcpy(im->name, im->stem);
+        im->active = 1;
+        return 1;
     }
-    if(ext&&!_stricmp(ext,".jad"))return fail(im,"select the JAR; its descriptor is generated from the manifest");
+    if (ext && !plat_stricmp(ext, ".jad"))
+        return fail(im, "select the JAR; its descriptor is generated from the manifest");
     if (!file_read(path, &im->file, &n)) return fail(im, "cannot read the input file");
     if (!n) { free(im->file); im->file = NULL; return fail(im, "the input file is empty"); }
     if (n > 16*1024*1024) { free(im->file); im->file = NULL; return fail(im, "the input file exceeds 16 MiB"); }
     im->size = (uint32_t)n;
     im->type=6;
-    {
-        if(ext&&(!_stricmp(ext,".png")||!_stricmp(ext,".jpg")||!_stricmp(ext,".jpeg")||
-                 !_stricmp(ext,".gif")||!_stricmp(ext,".bmp"))) {
-            if(!picture(im)){free(im->file);im->file=NULL;return 0;}
+    if (ext && (!plat_stricmp(ext, ".png") || !plat_stricmp(ext, ".jpg") ||
+                !plat_stricmp(ext, ".jpeg") || !plat_stricmp(ext, ".gif") ||
+                !plat_stricmp(ext, ".bmp"))) {
+        if (!picture(im)) {
+            free(im->file);
+            im->file = NULL;
+            return 0;
         }
     }
     /* ReadRecordData converts the requested byte length to halfwords with

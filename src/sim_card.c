@@ -1,9 +1,8 @@
 #include "sim_card.h"
+#include "port.h"
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 static void put(SimCard *c,unsigned byte)
 {
     if (c->response_size==sizeof(c->response)) { c->overflow=1; return; }
@@ -173,15 +172,20 @@ int sim_card_save_storage(SimCard *c,const char *path)
     crc=storage_crc(bytes,n);for(i=0;i<4;++i)bytes[n++]=(uint8_t)(crc>>(i*8));
     if(strlen(path)+5>=sizeof(temp)){snprintf(c->error,sizeof(c->error),"SIM storage path is too long");return 0;}snprintf(temp,sizeof(temp),"%s.tmp",path);
     f=fopen(temp,"wb");if(!f){snprintf(c->error,sizeof(c->error),"Could not open SIM storage for writing");return 0;}ok=fwrite(bytes,1,n,f)==n;if(fclose(f))ok=0;
-    if(ok)ok=MoveFileExA(temp,path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+    if (ok)
+        ok = plat_rename_replace(temp, path);
     if(!ok){remove(temp);snprintf(c->error,sizeof(c->error),"Could not save SIM storage");return 0;}
     c->dirty=0;return 1;
 }
 int sim_card_load_storage(SimCard *c,const char *path)
 {
     uint8_t bytes[8192];size_t n,pos=48;unsigned i;SimFile *targets[5];size_t offsets[5];FILE *f=fopen(path,"rb");uint32_t crc=0;
-    if(!f){DWORD attr=GetFileAttributesA(path);if(attr==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND)return 1;
-        snprintf(c->error,sizeof(c->error),"Could not open SIM storage");return 0;}
+    if (!f) {
+        if (plat_file_status(path) == 0)
+            return 1;
+        snprintf(c->error, sizeof(c->error), "Could not open SIM storage");
+        return 0;
+    }
     n=fread(bytes,1,sizeof(bytes),f);if(ferror(f)||!feof(f)){fclose(f);goto invalid;}if(fclose(f))goto invalid;
     if(n<52||memcmp(bytes,"SGHSIM1",8)||memcmp(bytes+8,c->imsi,16)||memcmp(bytes+24,c->iccid,21))goto invalid;
     for(i=0;i<4;++i)crc|=(uint32_t)bytes[n-4+i]<<(i*8);

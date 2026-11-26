@@ -1,5 +1,4 @@
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "port.h"
 #include "nvram.h"
 #include "firmware.h"
 #include <stdlib.h>
@@ -30,9 +29,10 @@ int main(void)
     CHECK(nvram_load(&m, "build/nv-fixture.snv"));
     CHECK(m.nvram_data[0] == 0x12 && m.nvram_data[m.nvram_size - 1] == 0x34 && m.nvram_data[1] == 255);
     CHECK(!nvram_save(&m, "build/nv-fixture.bin"));
-    (void)DeleteFileA("build/nv-rom-alias.bin");
-    CHECK(CreateHardLinkA("build/nv-rom-alias.bin", "build/nv-fixture.bin", NULL));
-    CHECK(!nvram_save(&m, "build/nv-rom-alias.bin")); CHECK(DeleteFileA("build/nv-rom-alias.bin"));
+    (void)plat_remove("build/nv-rom-alias.bin");
+    CHECK(plat_hard_link("build/nv-fixture.bin", "build/nv-rom-alias.bin"));
+    CHECK(!nvram_save(&m, "build/nv-rom-alias.bin"));
+    CHECK(plat_remove("build/nv-rom-alias.bin"));
     CHECK(firmware_sha256("build/nv-fixture.bin", after) && !strcmp(before, after));
     CHECK(machine_step(&m, 0)); CHECK(!nvram_load(&m, "build/nv-fixture.snv"));
     CHECK(machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
@@ -51,7 +51,8 @@ int main(void)
     f = fopen("build/nv-fixture.snv", "wb"); CHECK(f != NULL); CHECK(fputs("SGHNVM1", f) >= 0); CHECK(fclose(f) == 0);
     CHECK(!nvram_load(&m, "build/nv-fixture.snv"));
     f = fopen("build/nv-fixture.snv.tmp", "wb"); CHECK(f != NULL); CHECK(fputs("leave untouched", f) >= 0); CHECK(fclose(f) == 0);
-    CHECK(!nvram_save(&m, "build/nv-fixture.snv")); CHECK(DeleteFileA("build/nv-fixture.snv.tmp"));
+    CHECK(!nvram_save(&m, "build/nv-fixture.snv"));
+    CHECK(plat_remove("build/nv-fixture.snv.tmp"));
     config("nvram=0x100001e,0xffe2\n"); CHECK(!machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
     config("nvram=0x1000020,0x10000\n"); CHECK(!machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
     config("nvram=0x1000020,0xffe0\nnvram=0x1000020,0xffe0\n"); CHECK(!machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
@@ -66,7 +67,8 @@ int main(void)
         CHECK(machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
         CHECK(nvram_store_open(&store, &m, "build/nv-auto"));
         strcpy(stored, store.path);
-        nvram_store_release(&store); (void)DeleteFileA(stored);
+        nvram_store_release(&store);
+        (void)plat_remove(stored);
         CHECK(nvram_store_open(&store, &m, "build/nv-auto")); CHECK(!store.saved);
         CHECK(!nvram_store_open(&second, &m, "build/nv-auto")); CHECK(!second.active && !second.lock);
         m.nvram_data[0] = 0x42;
@@ -75,7 +77,8 @@ int main(void)
         f = fopen(tmp, "wb"); CHECK(f != NULL); CHECK(fclose(f) == 0);
         CHECK(nvram_store_flush(&store, &m)); /* Unchanged storage does not rewrite. */
         m.nvram_data[0] = 0x43; CHECK(!nvram_store_flush(&store, &m));
-        CHECK(DeleteFileA(tmp)); nvram_store_release(&store);
+        CHECK(plat_remove(tmp));
+        nvram_store_release(&store);
         CHECK(machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
         CHECK(nvram_store_open(&store, &m, "build/nv-auto")); CHECK(m.nvram_data[0] == 0x42);
         m.nvram_data[0] = 0x44; CHECK(nvram_store_flush(&store, &m)); nvram_store_release(&store);
@@ -86,12 +89,15 @@ int main(void)
         CHECK(fseek(f, 344, SEEK_SET) == 0 && fputc(0, f) != EOF); CHECK(fclose(f) == 0);
         CHECK(machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
         CHECK(!nvram_store_open(&store, &m, "build/nv-auto")); CHECK(!store.active && !store.lock);
-        CHECK(m.nvram_data[0] == 255); CHECK(DeleteFileA(stored));
+        CHECK(m.nvram_data[0] == 255);
+        CHECK(plat_remove(stored));
         code[5] ^= 1; f = fopen("build/nv-fixture.bin", "wb"); CHECK(f != NULL);
         CHECK(fwrite(code, 1, sizeof(code), f) == sizeof(code)); CHECK(fclose(f) == 0);
         CHECK(machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
         CHECK(nvram_store_open(&store, &m, "build/nv-auto")); strcpy(changed, store.path);
-        CHECK(strcmp(changed, stored) != 0); nvram_store_release(&store); (void)DeleteFileA(changed);
+        CHECK(strcmp(changed, stored) != 0);
+        nvram_store_release(&store);
+        (void)plat_remove(changed);
         /* Tiny Thumb factory functions return their documented success values. */
         code[8] = 0; code[9] = 0x20; code[10] = 0x70; code[11] = 0x47;
         code[12] = 1; code[13] = 0x20; code[14] = 0x70; code[15] = 0x47;
@@ -100,14 +106,17 @@ int main(void)
         config("nvram=0x1000020,0xffe0\nnv_provision=0x1000004,0x1000008,0x100000c\n");
         CHECK(machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
         CHECK(nvram_store_open(&store, &m, "build/nv-auto")); strcpy(stored, store.path);
-        nvram_store_release(&store); (void)DeleteFileA(stored);
+        nvram_store_release(&store);
+        (void)plat_remove(stored);
         CHECK(nvram_store_open(&store, &m, "build/nv-auto")); CHECK(store.provision);
-        CHECK(nvram_store_flush(&store, &m)); CHECK(GetFileAttributesA(stored) == INVALID_FILE_ATTRIBUTES);
+        CHECK(nvram_store_flush(&store, &m));
+        CHECK(plat_file_status(stored) == 0);
         m.cpu.cpsr |= ARM_T; m.cpu.r[15] = m.nv_trigger; m.cpu.r[4] = 0x87654321;
         CHECK(nvram_store_step(&store, &m) == 1 && store.stage == 1);
         CHECK(machine_step(&m, 0)); CHECK(machine_step(&m, 0));
         CHECK(nvram_store_step(&store, &m) == 1 && store.stage == 2);
-        CHECK(nvram_store_flush(&store, &m)); CHECK(GetFileAttributesA(stored) == INVALID_FILE_ATTRIBUTES);
+        CHECK(nvram_store_flush(&store, &m));
+        CHECK(plat_file_status(stored) == 0);
         CHECK(machine_step(&m, 0)); CHECK(machine_step(&m, 0)); instructions = m.cpu.instructions;
         m.cpu.clock_cycles=123456;
         CHECK(nvram_store_step(&store, &m) == 2 && store.stage == 3 && store.saved);
@@ -123,14 +132,16 @@ int main(void)
         CHECK(irom_add(&m.irom,0x81fe0,"version")); m.irom.services[1].calls = 1;
         CHECK(nvram_store_step(&store, &m) == 2 && !store.defaults_boot);
         CHECK(nvram_store_step(&store, &m) == 1); /* Exactly one settled-default reset. */
-        nvram_store_release(&store); CHECK(DeleteFileA(stored));
+        nvram_store_release(&store);
+        CHECK(plat_remove(stored));
         /* A failed guest formatter cannot commit a first-boot file. */
         CHECK(machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
         CHECK(nvram_store_open(&store, &m, "build/nv-auto"));
         m.cpu.cpsr |= ARM_T; m.cpu.r[15] = m.nv_trigger;
         CHECK(nvram_store_step(&store, &m) == 1); m.cpu.r[15] = m.nv_trigger; m.cpu.r[0] = 1;
         CHECK(!nvram_store_step(&store, &m)); CHECK(nvram_store_flush(&store, &m));
-        CHECK(GetFileAttributesA(stored) == INVALID_FILE_ATTRIBUTES); nvram_store_release(&store);
+        CHECK(plat_file_status(stored) == 0);
+        nvram_store_release(&store);
         config("nvram=0x1000020,0xffe0\nnv_provision=0x1000005,0x1000008,0x100000c\n");
         CHECK(!machine_load(&m, "build/nv-fixture.cfg", NULL, NULL));
         config("nvram=0x1000020,0xffe0\nnv_provision=0x1000004,0x1000040,0x100000c\n");
@@ -149,12 +160,17 @@ int main(void)
         nvram_store_release(&store);
         /* Migration must import the checked legacy snapshot, leaving it intact. */
         name=strrchr(model_save,'/');CHECK(name!=NULL);
-        snprintf(legacy,sizeof(legacy),"state/%s",name+1);CreateDirectoryA("state",NULL);
-        CHECK(nvram_save(&m,legacy));CHECK(DeleteFileA(model_save));
+        snprintf(legacy, sizeof(legacy), "state/%s", name + 1);
+        CHECK(plat_mkdir("state", 1));
+        CHECK(nvram_save(&m, legacy));
+        CHECK(plat_remove(model_save));
         CHECK(machine_load(&m,"build/nv-fixture.cfg",NULL,NULL));
         CHECK(nvram_store_open(&store,&m,NULL));CHECK(store.saved&&!store.provision);
-        CHECK(m.nvram_data[123]==0x42);CHECK(GetFileAttributesA(legacy)!=INVALID_FILE_ATTRIBUTES);
-        nvram_store_release(&store);CHECK(DeleteFileA(model_save));CHECK(DeleteFileA(legacy));
+        CHECK(m.nvram_data[123] == 0x42);
+        CHECK(plat_file_status(legacy) > 0);
+        nvram_store_release(&store);
+        CHECK(plat_remove(model_save));
+        CHECK(plat_remove(legacy));
     }
     machine_destroy(&m);
     printf("NVM snapshot validation: %u checks passed.\n", checks); return 0;

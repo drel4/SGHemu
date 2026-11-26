@@ -18,6 +18,7 @@
 #include "userfs.h"
 #include "content.h"
 #include "host.h"
+#include "port.h"
 #include "key_text.h"
 #include "emu_speed.h"
 #define ID_OPEN_MODEL 100
@@ -1191,6 +1192,29 @@ static unsigned __stdcall emu_main(void *argument)
     }
     return 0;
 }
+static void set_working_directory(void)
+{
+    char executable[1024], *slash;
+    DWORD length = GetModuleFileNameA(NULL, executable, sizeof(executable));
+
+    if (!length || length >= sizeof(executable)) return;
+    slash = strrchr(executable, '\\');
+    if (!slash) return;
+    *slash = 0;
+    if (!SetCurrentDirectoryA(executable)) return;
+
+    /* build/ uses the project directory. A GUI in build/<config>/ also uses
+       it unless it has its own models/ directory, as the PGO build does. */
+    slash = strrchr(executable, '\\');
+    if (slash && _stricmp(slash + 1, "build") && !plat_is_directory("models")) {
+        *slash = 0;
+        slash = strrchr(executable, '\\');
+    }
+    if (slash && !_stricmp(slash + 1, "build")) {
+        slash[1] = 0;
+        SetCurrentDirectoryA(executable);
+    }
+}
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, int show)
 {
     WNDCLASSEXA cls = {0};
@@ -1200,19 +1224,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
     ACCEL keys[] = {{FVIRTKEY | FCONTROL, 'O', ID_OPEN_FOLDER}, {FVIRTKEY | FCONTROL, 'R', ID_RESET},
         {FVIRTKEY | FCONTROL, 'T', ID_TEXT_INPUT},
         {FVIRTKEY, VK_F5, ID_RUN}, {FVIRTKEY, VK_F6, ID_PAUSE}, {FVIRTKEY, VK_F10, ID_STEP}};
-    char executable[1024], *slash;
     int exit_code;
     (void)previous; (void)command_line;
     app.sim_override=-1;
     emu_mutex = CreateMutexA(NULL, FALSE, NULL);
     if (!emu_mutex) return 1;
-    /* Both file dialogs and config paths use the project working directory. */
-    if (GetModuleFileNameA(NULL, executable, sizeof(executable))) {
-        slash = strrchr(executable, '\\'); if (slash) { *slash = 0; slash = strrchr(executable, '\\');
-            if (slash && !_stricmp(slash + 1, "build")) *slash = 0;
-            SetCurrentDirectoryA(executable);
-        }
-    }
+    set_working_directory();
     CreateDirectoryA("build", NULL);
     GetFullPathNameA("state/audio.ini",sizeof(app.audio_settings),app.audio_settings,NULL);
     GetFullPathNameA("state/emulator.ini",sizeof(app.emulator_settings),app.emulator_settings,NULL);

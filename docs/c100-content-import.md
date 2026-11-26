@@ -8,8 +8,9 @@ Storage is the ordinary automatically saved firmware-specific NVM snapshot;
 the firmware, not the host, constructs its filesystem records.
 
 * Sounds retain the existing type-6 guest writer path.
-* PNG/JPEG/GIF/BMP pictures are decoded with Windows WIC, fitted proportionally
-  inside 128 x 128 and converted to RGB565. Animated inputs use the first frame.
+* Windows WIC decodes PNG/JPEG/GIF/BMP pictures and uses the first frame of
+  animated inputs. Linux decodes uncompressed 24- and 32-bit BMP files.
+  Both paths fit the picture proportionally inside 128 x 128 and convert it to RGB565.
   The native container has a nine-byte animation header (width, height,
   animation flag, frame count, reserved byte, little-endian bitmap-body length),
   followed by a two-byte format/palette header and little-endian RGB565 pixels.

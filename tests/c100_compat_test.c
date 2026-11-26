@@ -1,7 +1,6 @@
 /* Optional real-ROM integration test. All writes use a NEW, explicitly supplied
    private state directory; never opens the user's model-local NVM. */
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "port.h"
 #include "machine.h"
 #include "nvram.h"
 #include "userfs.h"
@@ -47,7 +46,10 @@ int main(int argc,char **argv)
     int result=1;
     if(argc!=4){fprintf(stderr,"Usage: c100_compat_test MODEL.cfg NEW_STATE_DIR OUTPUT_PREFIX\n");return 2;}
     config=argv[1];state_dir=argv[2];prefix=argv[3];
-    if(!CreateDirectoryA(state_dir,NULL)){fprintf(stderr,"State directory must be new; existing files are never overwritten\n");return 2;}
+    if (!plat_mkdir(state_dir, 0)) {
+        fprintf(stderr, "State directory must be new; existing files are never overwritten\n");
+        return 2;
+    }
     m=calloc(1,sizeof(*m));if(!m)return 1;
     if(!load())goto done;
     if(!m->battery.adc||!m->battery.charger_port||!m->lp_timer.attached||!m->cellular.ready)goto done;

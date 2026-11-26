@@ -93,7 +93,11 @@ int main(int argc, char **argv)
     log = fopen("build/unmapped.log", "w");
     if (!log) { if (trace) fclose(trace); return 1; }
     if (!machine_load_pair(&m, model, matches ? matches[0].rom[0] : NULL, matches ? matches[0].rom[1] : NULL, log)) { fprintf(stderr, "%s\n", m.error); result = 1; goto done; }
-    if(high_priority&&!host_high_priority(1)){fprintf(stderr,"Windows rejected High process priority.\n");result=1;goto done;}
+    if (high_priority && !host_high_priority(1)) {
+        fprintf(stderr, "Could not raise process priority.\n");
+        result = 1;
+        goto done;
+    }
     m.java_extended=java_extended;
     if(java_extended&&!m.java_buffer_get){fprintf(stderr,"This model has no extended Java buffer profile.\n");result=1;goto done;}
     if(rtc_sync&&!host_sync_rtc(&m.rtc)){fprintf(stderr,"Host RTC sync unavailable: model has no RTC or date is outside its year range.\n");result=1;goto done;}

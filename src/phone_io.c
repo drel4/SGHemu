@@ -1,18 +1,29 @@
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <mmsystem.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "phone_io.h"
+
 #define PI 3.14159265358979323846
 #define SLOTS 12
+
 struct PhoneOutput {
-    HWAVEOUT wave;HANDLE event;WAVEHDR headers[SLOTS];
-    int16_t pcm[SLOTS][480];unsigned slot,fill;
-    FILE *wav;int failed,paused;
+#ifdef _WIN32
+    HWAVEOUT wave;
+    HANDLE event;
+    WAVEHDR headers[SLOTS];
+#endif
+    int16_t pcm[SLOTS][480];
+    unsigned slot, fill;
+    FILE *wav;
+    int failed, paused;
 };
+
 static void put32(unsigned char *p,uint32_t n){unsigned i;for(i=0;i<4;++i)p[i]=(unsigned char)(n>>(i*8));}
 static int header(PhoneIo *io){unsigned char b[44]={0};uint32_t bytes;
     if(io->frames>(UINT32_MAX-36u)/2u)return 0;bytes=(uint32_t)io->frames*2;
@@ -53,6 +64,7 @@ void phone_io_observe(PhoneIo *io,Arm7 *c){unsigned i;uint32_t note[2],v,a;
     }
     ++io->tone_changes;
 }
+
 void phone_io_gpio_write(void *context,unsigned mask,unsigned value,uint64_t ticks)
 {
     PhoneIo *io=context;unsigned i,relevant=0,state=0;
@@ -61,29 +73,105 @@ void phone_io_gpio_write(void *context,unsigned mask,unsigned value,uint64_t tic
     if(!(mask&relevant))return;
     io->led_tick=ticks;if(io->led!=state)++io->led_changes;io->led=state;
 }
-int phone_io_open(PhoneIo *io,int speakers,const char *wav){PhoneOutput *o;WAVEFORMATEX fmt={0};
-    if(!io->configured)return 1;phone_io_close(io);o=calloc(1,sizeof(*o));if(!o)return 0;io->output=o;
-    io->frames=io->nonzero=io->fraction=io->last_ns=0;
-    if(wav){o->wav=fopen(wav,"wb");if(!o->wav||!header(io))goto failed;}
-    if(speakers){fmt.wFormatTag=WAVE_FORMAT_PCM;fmt.nChannels=1;fmt.nSamplesPerSec=48000;
-        fmt.wBitsPerSample=16;fmt.nBlockAlign=2;fmt.nAvgBytesPerSec=96000;
-        o->event=CreateEventA(NULL,FALSE,FALSE,NULL);if(!o->event)goto failed;
-        if(waveOutOpen(&o->wave,WAVE_MAPPER,&fmt,(DWORD_PTR)o->event,0,CALLBACK_EVENT)!=MMSYSERR_NOERROR)goto failed;}
+
+int phone_io_open(PhoneIo *io, int speakers, const char *wav)
+{
+    PhoneOutput *o;
+
+    if (!io->configured)
+        return 1;
+#ifndef _WIN32
+    if (speakers)
+        return 0;
+#endif
+    phone_io_close(io);
+    o = calloc(1, sizeof(*o));
+    if (!o)
+        return 0;
+    io->output = o;
+    io->frames = io->nonzero = io->fraction = io->last_ns = 0;
+    if (wav) {
+        o->wav = fopen(wav, "wb");
+        if (!o->wav || !header(io))
+            goto failed;
+    }
+#ifdef _WIN32
+    if (speakers) {
+        WAVEFORMATEX fmt = {0};
+        fmt.wFormatTag = WAVE_FORMAT_PCM;
+        fmt.nChannels = 1;
+        fmt.nSamplesPerSec = 48000;
+        fmt.wBitsPerSample = 16;
+        fmt.nBlockAlign = 2;
+        fmt.nAvgBytesPerSec = 96000;
+        o->event = CreateEventA(NULL, FALSE, FALSE, NULL);
+        if (!o->event)
+            goto failed;
+        if (waveOutOpen(&o->wave, WAVE_MAPPER, &fmt, (DWORD_PTR)o->event, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR)
+            goto failed;
+    }
+#endif
     return 1;
-failed:phone_io_close(io);return 0;
+failed:
+    phone_io_close(io);
+    return 0;
 }
-void phone_io_pause(PhoneIo *io,int pause){PhoneOutput *o=io->output;if(!o)return;
-    if(o->paused==!!pause)return;o->paused=!!pause;if(o->wave){if(pause)waveOutPause(o->wave);else waveOutRestart(o->wave);}}
-static int flush(PhoneIo *io){PhoneOutput *o=io->output;WAVEHDR *h=&o->headers[o->slot];
-    if(o->wav&&fwrite(o->pcm[o->slot],2,o->fill,o->wav)!=o->fill)return 0;
-    if(o->wave){memset(h,0,sizeof(*h));h->lpData=(LPSTR)o->pcm[o->slot];h->dwBufferLength=o->fill*2;
-        if(waveOutPrepareHeader(o->wave,h,sizeof(*h))!=MMSYSERR_NOERROR||waveOutWrite(o->wave,h,sizeof(*h))!=MMSYSERR_NOERROR)return 0;}
-    o->fill=0;o->slot=(o->slot+1)%SLOTS;h=&o->headers[o->slot];
-    if(o->wave&&(h->dwFlags&WHDR_PREPARED)){
-        while(!(h->dwFlags&WHDR_DONE))if(WaitForSingleObject(o->event,2000)==WAIT_TIMEOUT)return 0;
-        if(waveOutUnprepareHeader(o->wave,h,sizeof(*h))!=MMSYSERR_NOERROR)return 0;}
+
+void phone_io_pause(PhoneIo *io, int pause)
+{
+    PhoneOutput *o = io->output;
+
+    if (!o)
+        return;
+    if (o->paused == !!pause)
+        return;
+    o->paused = !!pause;
+#ifdef _WIN32
+    if (o->wave) {
+        if (pause)
+            waveOutPause(o->wave);
+        else
+            waveOutRestart(o->wave);
+    }
+#endif
+}
+
+static int flush(PhoneIo *io)
+{
+    PhoneOutput *o = io->output;
+
+    if (o->wav && fwrite(o->pcm[o->slot], 2, o->fill, o->wav) != o->fill)
+        return 0;
+#ifdef _WIN32
+    if (o->wave) {
+        WAVEHDR *h = &o->headers[o->slot];
+        memset(h, 0, sizeof(*h));
+        h->lpData = (LPSTR)o->pcm[o->slot];
+        h->dwBufferLength = o->fill * 2;
+        if (waveOutPrepareHeader(o->wave, h, sizeof(*h)) != MMSYSERR_NOERROR ||
+            waveOutWrite(o->wave, h, sizeof(*h)) != MMSYSERR_NOERROR)
+            return 0;
+    }
+#endif
+    o->fill = 0;
+    o->slot = (o->slot + 1) % SLOTS;
+#ifdef _WIN32
+    /* waveOut owns a submitted buffer until playback completes. Wait before
+       reusing the next slot in the ring. */
+    if (o->wave) {
+        WAVEHDR *h = &o->headers[o->slot];
+        if (h->dwFlags & WHDR_PREPARED) {
+            while (!(h->dwFlags & WHDR_DONE))
+                if (WaitForSingleObject(o->event, 2000) == WAIT_TIMEOUT)
+                    return 0;
+            if (waveOutUnprepareHeader(o->wave, h, sizeof(*h)) != MMSYSERR_NOERROR)
+                return 0;
+        }
+    }
+#endif
     return 1;
 }
+
 static int16_t next_sample(PhoneIo *io)
 {
     double value=0;int sample;unsigned i;
@@ -104,6 +192,7 @@ static void output_sample(PhoneIo *io,int16_t sample)
     o->pcm[o->slot][o->fill++]=sample;
     if(o->fill==480&&!flush(io))o->failed=1;
 }
+
 /* Runs on the MA worker while the emulation caller is synchronously waiting.
    Thus tone parameters cannot change concurrently, and one output queue is
    the clock for both CPU and Yamaha sound. No DLL call is made by this mixer. */
@@ -124,9 +213,31 @@ void phone_io_advance(PhoneIo *io,uint64_t ns)
     io->fraction=count%1000000000;count/=1000000000;
     while(count--&&!o->failed)output_sample(io,next_sample(io));
 }
-void phone_io_close(PhoneIo *io){PhoneOutput *o=io->output;unsigned i;if(!o)return;
-    if(o->wav&&o->fill)fwrite(o->pcm[o->slot],2,o->fill,o->wav);
-    if(o->wave){waveOutReset(o->wave);for(i=0;i<SLOTS;++i)if(o->headers[i].dwFlags&WHDR_PREPARED)
-        waveOutUnprepareHeader(o->wave,&o->headers[i],sizeof(WAVEHDR));waveOutClose(o->wave);}
-    if(o->event)CloseHandle(o->event);if(o->wav){header(io);fclose(o->wav);}free(o);io->output=NULL;
+
+void phone_io_close(PhoneIo *io)
+{
+    PhoneOutput *o = io->output;
+    if (!o)
+        return;
+    if (o->wav && o->fill)
+        fwrite(o->pcm[o->slot], 2, o->fill, o->wav);
+#ifdef _WIN32
+    if (o->wave) {
+        unsigned i;
+        waveOutReset(o->wave);
+        for (i = 0; i < SLOTS; ++i)
+            if (o->headers[i].dwFlags & WHDR_PREPARED)
+                waveOutUnprepareHeader(o->wave, &o->headers[i], sizeof(WAVEHDR));
+        waveOutClose(o->wave);
+    }
+    if (o->event)
+        CloseHandle(o->event);
+#endif
+    if (o->wav) {
+        /* Replace the provisional WAV header with the final sample count. */
+        header(io);
+        fclose(o->wav);
+    }
+    free(o);
+    io->output = NULL;
 }
