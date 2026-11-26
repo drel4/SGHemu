@@ -123,6 +123,23 @@ To try C100XEDK1, point `--folder` at the directory containing both ROM images:
 The CLI matches the images to a model by SHA-256 and saves the LCD frame to
 `build/lcd.bmp`. `--no-persist` skips loading and saving phone state.
 
+To build the Linux GUI, install a C++17 compiler, `pkg-config`, and the Qt 5
+Widgets development files (`qtbase5-dev` on Debian/Ubuntu or `qt5-base` on Arch):
+
+```sh
+make gui
+./build/linux/sghemu-gui
+```
+
+In **File > Open firmware folder (Ctrl+O)**, select the folder containing both
+ROM files. A recognized pair boots automatically. **Open model config** loads a
+`.cfg` with its own ROM paths; press **Run (F5)** to start it. **Pause (F6)**
+keeps the current LCD frame, **Stop / Reset (Ctrl+R)** cold-resets the phone and
+leaves it stopped, and **Step instruction (F10)** advances a paused machine.
+Use the on-screen keypad, or arrows, Enter/Space, F1–F4 (soft keys, Call/End),
+digits, `*`, `#`, and Backspace. Phone state is saved in `state/` next to the
+model config, as with the CLI.
+
 The host network bridge, live audio and the Yamaha DLL backend are Windows-only.
 Linux picture import supports uncompressed 24- and 32-bit BMP files.
 
@@ -327,10 +344,10 @@ license preserved separately from the project's WTFPL.
 | `docs/` | Reverse-engineering evidence and remaining hardware work |
 | `models/**/roms/`, `MA5libs/*.dll`, `build/` | Ignored private inputs/artifacts |
 
-The CLI (`src/main.c`) and Windows GUI (`src/gui.c`) share `src/machine.c`,
-which loads the model and runs the emulated phone. Host file and clock
-operations are declared in `src/port.h` and implemented in `src/port_posix.c`
-or `src/port_win32.c`, selected by the Makefile.
+The CLI (`src/main.c`), Windows GUI (`src/gui.c`) and Linux GUI (`src/gui_qt.cpp`)
+share `src/machine.c`, which loads the model and runs the emulated phone. Host
+file and clock operations are declared in `src/port.h` and implemented in
+`src/port_posix.c` or `src/port_win32.c`, selected by the Makefile.
 
 ## License
 

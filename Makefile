@@ -63,10 +63,13 @@ BACKENDS := src/net_stub.c src/ma5_hw_stub.c
 
 CPPFLAGS += -Isrc
 CFLAGS += -std=c17 -Wall -Wextra
+CXXFLAGS += -std=c++17 -Wall -Wextra
 ifeq ($(CONFIG),debug)
 CFLAGS += -O0 -g
+CXXFLAGS += -O0 -g
 else
 CFLAGS += -O2
+CXXFLAGS += -O2
 endif
 LDLIBS += -lm
 
@@ -177,7 +180,18 @@ endif
 # Linux objects track their own header dependencies in .d files. For MSVC,
 # rebuild on any project header change, including the reference CPU in tests/.
 HEADERS := $(wildcard src/*.h tests/*.h third_party/puff/*.h)
-.PHONY: gui
+else
+# Only `make gui` needs Qt 5. Compile the frontend as C++, reuse the C core.
+PKG_CONFIG ?= pkg-config
+GUI_BIN := $(BUILD)/sghemu-gui
+gui: $(GUI_BIN)
+
+$(BUILD)/src/gui_qt.o: src/gui_qt.cpp Makefile | $(BUILD)/src
+	@$(PKG_CONFIG) --exists Qt5Widgets || { echo "Install the Qt 5 Widgets development files (Qt5Widgets.pc)." >&2; exit 1; }
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -fPIC $$($(PKG_CONFIG) --cflags Qt5Widgets) -MMD -MP -c "$<" -o "$@"
+
+$(GUI_BIN): $(BUILD)/src/gui_qt.o $(call objects,$(MACHINE_SRC) $(NVRAM_SRC))
+	$(CXX) $(LDFLAGS) $^ -o "$@" $$($(PKG_CONFIG) --libs Qt5Widgets) $(LDLIBS)
 endif
 
 # Runtime logs and test fixtures use build/ even with a custom BUILD path.
@@ -228,4 +242,4 @@ else
 	rm -rf -- "$(BUILD)"
 endif
 
-.PHONY: all check clean tests tools
+.PHONY: all check clean gui tests tools
